@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>試合オートズーム</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="オートズーム">
+<meta name="theme-color" content="#0b0f0c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+:root{
+  --bg:#0b0f0c; --panel:#161d18; --line:#2a352d; --ink:#eef3ee; --muted:#9caa9f;
+  --bib:#ff7a1a; --rec:#ff3b30; --pitch:#4fa868;
+  --sl:env(safe-area-inset-left,0px); --sr:env(safe-area-inset-right,0px);
+  --st:env(safe-area-inset-top,0px); --sb:env(safe-area-inset-bottom,0px);
+  color-scheme:dark;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN",sans-serif;font-size:15px;
+  -webkit-user-select:none;user-select:none;overscroll-behavior:none}
+button{font:inherit;color:inherit;cursor:pointer}
+[hidden]{display:none!important}
+
+/* camera feed: kept in the DOM (iOS stops decoding hidden videos) but invisible */
+#v{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+#zoom,#zoomH{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+.offview{visibility:hidden}
+#viewBtn{font-weight:700}
+
+#ov{position:fixed;top:calc(var(--st) + 10px);left:calc(var(--sl) + 10px);width:24vmin;max-width:220px;min-width:120px;
+  border:1px solid rgba(255,255,255,.35);border-radius:6px;background:#000}
+#hud{position:fixed;top:calc(var(--st) + 10px);left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center}
+.pill{background:rgba(0,0,0,.55);border-radius:999px;padding:4px 11px;font-size:13px;font-variant-numeric:tabular-nums;display:flex;gap:6px;align-items:center;white-space:nowrap}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.pill.on i{background:var(--rec);animation:blink 1.1s infinite}
+@keyframes blink{50%{opacity:.25}}
+#zoomTxt{font-weight:700}
+#trackTxt.ball{color:#fff;font-weight:700}
+#trackTxt.ball::before{content:"●";color:#fff;margin-right:4px}
+.swatch{display:inline-block;width:18px;height:18px;border-radius:50%;border:2px solid #fff;margin-left:8px;vertical-align:middle}
+#tapRing{position:fixed;width:56px;height:56px;margin:-28px 0 0 -28px;border:3px solid var(--bib);border-radius:50%;pointer-events:none}
+body.picking canvas{cursor:crosshair}
+body.selecting canvas{touch-action:none;cursor:crosshair}
+.tag{font-size:12px;background:var(--pitch);color:#fff;border-radius:5px;padding:1px 7px;margin-left:8px;font-weight:700}
+
+/* control rail: right side in landscape, bottom in portrait */
+#rail{position:fixed;display:flex;align-items:center;justify-content:space-between;gap:18px;
+  right:calc(var(--sr) + 14px);top:50%;transform:translateY(-50%);flex-direction:column}
+@media (orientation:portrait){
+  #rail{right:auto;top:auto;left:50%;bottom:calc(var(--sb) + 18px);transform:translateX(-50%);flex-direction:row}
+}
+.round{width:50px;height:50px;border-radius:50%;border:0;background:rgba(0,0,0,.55);display:grid;place-items:center;font-size:12px;line-height:1.15;text-align:center;position:relative}
+.round svg{width:24px;height:24px}
+.badge{position:absolute;top:-2px;right:-2px;background:var(--bib);color:#1a0d02;font-size:11px;font-weight:700;border-radius:999px;min-width:18px;height:18px;padding:0 5px;display:grid;place-items:center}
+#rec{width:74px;height:74px;border-radius:50%;border:4px solid #fff;background:transparent;display:grid;place-items:center;padding:0}
+#rec span{width:56px;height:56px;border-radius:50%;background:var(--rec);transition:all .2s}
+#rec.on span{width:28px;height:28px;border-radius:6px}
+#rec:disabled{opacity:.4}
+button:focus-visible{outline:3px solid var(--bib);outline-offset:3px}
+
+/* sheets */
+.sheet{position:fixed;inset:0;background:rgba(5,8,6,.82);display:flex;align-items:center;justify-content:center;
+  padding:calc(var(--st) + 16px) calc(var(--sr) + 16px) calc(var(--sb) + 16px) calc(var(--sl) + 16px)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;width:100%;max-width:520px;max-height:100%;overflow:auto;padding:18px;display:grid;gap:14px;-webkit-user-select:text;user-select:text}
+.card h1{margin:0;font-size:1.5rem;letter-spacing:.02em}
+.card h1 b{color:var(--bib)}
+.card h2{margin:0;font-size:1.1rem}
+.card p{margin:0;color:var(--muted);line-height:1.6}
+.card ol{margin:0;padding-left:1.3em;color:var(--muted);line-height:1.6;display:grid;gap:4px}
+.card ol strong{color:var(--ink)}
+.btn{border:1px solid var(--line);background:#222b24;border-radius:10px;padding:12px 16px;font-weight:700}
+.btn.primary{background:var(--bib);border-color:var(--bib);color:#1a0d02}
+.btn.small{padding:7px 12px;font-size:13px;border-radius:8px}
+.head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.err{color:#ff8f87!important}
+.install{display:grid;gap:4px;border:1px dashed var(--bib);border-radius:10px;padding:10px 12px;color:var(--muted);line-height:1.6}
+.install strong{color:var(--ink)}
+.shareic{display:inline-grid;place-items:center;width:22px;height:22px;border:1.5px solid var(--ink);border-radius:5px;color:var(--ink);font-size:12px}
+
+.row{display:grid;gap:5px}
+.row label{display:flex;justify-content:space-between;gap:8px}
+.row output{color:var(--bib);font-weight:700;font-variant-numeric:tabular-nums}
+.row small{color:var(--muted);font-size:12px}
+input[type=range]{width:100%;accent-color:var(--bib)}
+select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--line);border-radius:8px;padding:9px;width:100%}
+.seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{flex:1;border:0;background:transparent;padding:8px 6px;font-size:13px}
+.seg button[aria-pressed=true]{background:var(--pitch);color:#fff;font-weight:700}
+
+.clip{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.clip .t{font-weight:700}
+.clip .t em{font-style:normal;font-size:12px;border-radius:5px;padding:1px 6px;margin-left:6px;background:#2a352d}
+.clip .t em.zoom{background:var(--bib);color:#1a0d02}
+.clip .m{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.clip .acts{grid-row:span 2;display:flex;gap:6px}
+#toast{position:fixed;left:50%;bottom:calc(var(--sb) + 110px);transform:translateX(-50%);background:rgba(0,0,0,.8);padding:9px 14px;border-radius:10px;font-size:14px;max-width:86vw;text-align:center}
+@media (orientation:landscape){#toast{bottom:calc(var(--sb) + 20px)}}
+@media (prefers-reduced-motion:reduce){.pill.on i{animation:none}#rec span{transition:none}}
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<canvas id="zoom" width="1280" height="720"></canvas>
+<canvas id="zoomH" width="1280" height="720" class="offview"></canvas>
+<canvas id="ov" width="220" height="124"></canvas>
+
+<div id="hud">
+  <div class="pill" id="recPill"><i></i><span id="recTxt">待機中</span></div>
+  <div class="pill"><span id="trackTxt">準備中</span></div>
+  <div class="pill"><span id="zoomTxt">×1.0</span></div>
+</div>
+
+<div id="rail">
+  <button class="round" id="openSet" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  <button id="rec" aria-label="録画開始" disabled><span></span></button>
+  <button class="round" id="openClips" aria-label="録画一覧"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg><span class="badge" id="clipCount" hidden>0</span></button>
+  <button class="round" id="viewBtn" aria-label="画面に表示する画角を切り替え">自由</button>
+</div>
+
+<!-- start -->
+<div class="sheet" id="start">
+  <div class="card">
+    <h1>試合<b>オートズーム</b></h1>
+    <p>スマホを固定して撮影すると、選手とボールの動きを追いかけて自動でアップにします。アップの映像と全体の映像を同時に録画できます。</p>
+    <ol>
+      <li><strong>横向き</strong>にして、センターライン付近の2階席や高い位置から、両方のゴールが入るように固定します。</li>
+      <li>設定で<strong>超広角カメラ</strong>を選ぶと、近い場所からでも全体が入ります。</li>
+      <li>録画中は<strong>画面を消さず</strong>、アプリを閉じないでください。</li>
+    </ol>
+    <div id="install" class="install" hidden>
+      <strong>アプリとして入れるには</strong>
+      <span>画面下の共有ボタン <b class="shareic" aria-hidden="true">⬆︎</b> を押して、「ホーム画面に追加」を選んでください。次からはホーム画面のアイコンから起動できます。</span>
+    </div>
+    <p id="startErr" class="err" hidden></p>
+    <button class="btn primary" id="startBtn">カメラを起動</button>
+  </div>
+</div>
+
+<!-- settings -->
+<div class="sheet" id="settings" hidden>
+  <div class="card">
+    <div class="head"><h2>設定</h2><button class="btn small" id="closeSet">閉じる</button></div>
+    <div class="row">
+      <label for="camSel">カメラ</label>
+      <select id="camSel"></select>
+    </div>
+    <div class="row">
+      <label>競技</label>
+      <div class="seg" id="sportSeg"><button data-v="handball">ハンドボール</button><button data-v="basketball">バスケ</button><button data-v="other">その他</button></div>
+      <small id="sportNote"></small>
+    </div>
+    <div class="row">
+      <label>追いかける対象</label>
+      <div class="seg" id="targetSeg">
+        <button data-v="ball">ボール優先</button><button data-v="crowd">人の集まり</button><button data-v="all">動き全体</button>
+      </div>
+      <small id="aiNote">ボール優先は、AIでボールを探し、見失ったら選手が一番集まっている場所を追います。初回だけ電波のある場所で起動してください。</small>
+    </div>
+    <div class="row">
+      <label>ボールの色<span class="swatch" id="swatch" hidden></span></label>
+      <div class="seg">
+        <button id="pickColor">ボールをタップして登録</button><button id="clearColor">解除</button>
+      </div>
+      <small>AIが見落としたときの助けになります。オレンジや黄色など、ユニフォームと違う色のボールで特に効きます。</small>
+    </div>
+    <div class="row">
+      <label>スコアボードの小窓<span class="tag" id="sbTag" hidden>登録済み</span></label>
+      <div class="seg">
+        <button id="pickSB">スコアボード</button><button id="clearSB">解除</button>
+      </div>
+      <small>全体の映像からスコアボードを切り抜き、アップの映像の右下に小さく入れます。録画にも入ります。</small>
+    </div>
+    <div class="row">
+      <label>録画する映像</label>
+      <div class="seg" id="recSeg">
+        <button data-v="free">自由ズーム</button><button data-v="half">ハーフ</button><button data-v="full">全体</button>
+      </div>
+      <small>押すたびにオン・オフします。選んだものを同時に録画します。3つ同時は重くなることがあります。</small>
+    </div>
+    <div class="row">
+      <label>画面に表示する画角</label>
+      <div class="seg" id="frameSeg"><button data-v="half">ハーフコート</button><button data-v="free">自由ズーム</button></div>
+      <small id="frameNote"></small>
+    </div>
+    <div class="row" data-for="half">
+      <label for="halfZoom">ハーフの大きさ<output id="hzOut"></output></label>
+      <input type="range" id="halfZoom" min="1.3" max="2.6" step="0.05">
+      <small>コートの半分がちょうど収まるように合わせてください。</small>
+    </div>
+    <div class="row" data-for="free">
+      <label>ズームの決め方</label>
+      <div class="seg" id="autoSeg">
+        <button data-v="1">自動（密集度で変える）</button><button data-v="0">固定</button>
+      </div>
+    </div>
+    <div class="row" data-for="free">
+      <label for="maxZoom"><span id="mzLabel">最大ズーム</span><output id="mzOut"></output></label>
+      <input type="range" id="maxZoom" min="1.2" max="4" step="0.1">
+    </div>
+    <div class="row">
+      <label for="smooth"><span id="smLabel">カメラの動き</span><output id="smOut"></output></label>
+      <input type="range" id="smooth" min="0" max="1" step="0.05">
+      <small>右ほどゆっくり追います。見ていて酔う場合は右へ。</small>
+    </div>
+    <div class="row">
+      <label for="sens">動きの感度<output id="seOut"></output></label>
+      <input type="range" id="sens" min="0" max="100" step="5">
+      <small>木の揺れや影に反応するときは下げてください。</small>
+    </div>
+    <div class="row">
+      <label for="top">上側を追跡しない<output id="tpOut"></output></label>
+      <input type="range" id="top" min="0" max="50" step="5">
+      <small>観客席や空が映る部分を外します。左上の小窓で斜線の範囲です。</small>
+    </div>
+    <div class="row">
+      <label>全体の小窓</label>
+      <div class="seg" id="ovSeg"><button data-v="1">表示</button><button data-v="0">隠す</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- clips -->
+<div class="sheet" id="clips" hidden>
+  <div class="card">
+    <div class="head"><h2>録画一覧</h2><button class="btn small" id="closeClips">閉じる</button></div>
+    <p>「写真に保存」を押すと共有メニューが開くので、「ビデオを保存」を選んでください。保存したらここから削除すると、iPhoneの容量が空きます。</p>
+    <div id="clipList"></div>
+  </div>
+</div>
+
+<div id="toast" hidden role="status"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const v = $('v'), ov = $('ov'), ovx = ov.getContext('2d');
+  const zF = $('zoom'), zH = $('zoomH'), ctxF = zF.getContext('2d'), ctxH = zH.getContext('2d');
+  let zc = zF, zctx = ctxF;   // the canvas currently shown on screen
+
+  // ---------- settings ----------
+  const DEF = { frame: 'free', rec: { free: true, half: true, full: false }, halfZoom: 1.8, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .45, sens: 50, top: 20, showOv: true, camId: '' };
+  let set = { ...DEF };
+  try { Object.assign(set, JSON.parse(localStorage.getItem('az-set') || '{}')); } catch (e) {}
+  const saveSet = () => { try { localStorage.setItem('az-set', JSON.stringify(set)); } catch (e) {} };
+
+  // ---------- toast ----------
+  let toastT;
+  function toast(s, ms = 3500) { const t = $('toast'); t.textContent = s; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, ms); }
+
+  // ---------- storage (IndexedDB keeps recordings on disk, not in memory) ----------
+  let dbp = null;
+  function db() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('autozoom', 1);
+      r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('clips', { keyPath: 'id' }); d.createObjectStore('chunks', { autoIncrement: true }).createIndex('clip', 'clip'); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  const req = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  async function store(name, mode) { return (await db()).transaction(name, mode).objectStore(name); }
+  async function putClip(c) { return req((await store('clips', 'readwrite')).put(c)); }
+  async function allClips() { return req((await store('clips', 'readonly')).getAll()); }
+  async function addChunk(clip, blob) { return req((await store('chunks', 'readwrite')).add({ clip, blob })); }
+  async function clipBlob(c) {
+    const rows = await req((await store('chunks', 'readonly')).index('clip').getAll(c.id));
+    return new Blob(rows.map(r => r.blob), { type: c.mime });
+  }
+  async function deleteClip(id) {
+    const d = await db(); const tx = d.transaction(['clips', 'chunks'], 'readwrite');
+    tx.objectStore('clips').delete(id);
+    const keys = await req(tx.objectStore('chunks').index('clip').getAllKeys(id));
+    keys.forEach(k => tx.objectStore('chunks').delete(k));
+    return new Promise(r => tx.oncomplete = r);
+  }
+
+  // ---------- camera ----------
+  let stream = null, srcW = 1920, srcH = 1080;
+  async function startCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const video = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } };
+    if (set.camId) video.deviceId = { exact: set.camId }; else video.facingMode = { ideal: 'environment' };
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+    } catch (e) {
+      if (set.camId) { set.camId = ''; saveSet(); return startCamera(); }
+      try { stream = await navigator.mediaDevices.getUserMedia({ video, audio: false }); toast('マイクが使えないため、音なしで録画します。'); }
+      catch (e2) { throw e2; }
+    }
+    v.srcObject = stream;
+    await v.play().catch(() => {});
+    await new Promise(r => { if (v.videoWidth) r(); else v.addEventListener('loadedmetadata', r, { once: true }); });
+    setupSize();
+    await fillCameras();
+  }
+  async function fillCameras() {
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+      const cur = stream.getVideoTracks()[0]?.getSettings().deviceId;
+      const sel = $('camSel'); sel.innerHTML = '';
+      devs.forEach((d, i) => { const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || `カメラ ${i + 1}`; if (d.deviceId === cur) o.selected = true; sel.appendChild(o); });
+    } catch (e) {}
+  }
+
+  // ---------- tracking ----------
+  // Motion map at 320px wide. Players: densest cluster of motion. Ball: AI detector, then registered ball color.
+  const AW = 320, CELL = 10; let AH = 180, GW = 32, GH = 18;
+  const ana = document.createElement('canvas'); const actx = ana.getContext('2d', { willReadFrequently: true });
+  const lay = document.createElement('canvas'); const lctx = lay.getContext('2d');
+  let prev, mark, colH, rowH, grid, integ, layImg, hasPrev = false;
+  // two virtual cameras run side by side on the same analysis: free zoom and half court
+  const newCam = () => ({ cx: .5, cy: .6, z: 1, tx: .5, ty: .6, tz: 1, last: 0, side: 0, sideT: 0 });
+  const camFree = newCam(), camHalf = newCam();
+  let cam = camFree, frameMode = 'free';
+  const viewCam = () => set.frame === 'half' ? camHalf : camFree;
+  const mv = { vx: 0, fastT: 0, fastHold: 0 }; let prevAllX = null;
+  const dbg = {}; let clusterWin = null;            // {gx, gy} window kept between frames (hysteresis)
+  let aiBall = null, colorBall = null, lastCluster = null, trackMode = '';
+
+  function setupSize() {
+    srcW = v.videoWidth || 1920; srcH = v.videoHeight || 1080;
+    AH = Math.max(40, Math.round(AW * srcH / srcW));
+    ana.width = AW; ana.height = AH; lay.width = AW; lay.height = AH;
+    GW = Math.ceil(AW / CELL); GH = Math.ceil(AH / CELL);
+    prev = new Uint8Array(AW * AH); mark = new Uint8Array(AW * AH);
+    colH = new Uint32Array(AW); rowH = new Uint32Array(AH);
+    grid = new Uint32Array(GW * GH); integ = new Uint32Array((GW + 1) * (GH + 1));
+    layImg = lctx.createImageData(AW, AH);
+    hasPrev = false; clusterWin = null; prevAllX = null; mv.vx = 0;
+    const big = Math.max(srcW, srcH) >= 2560;
+    const ow = srcW >= srcH ? (big ? 1920 : 1280) : (big ? 1080 : 720);
+    for (const c of [zF, zH]) { c.width = ow; c.height = Math.round(ow * srcH / srcW); }
+    ov.width = 240; ov.height = Math.round(240 * srcH / srcW);
+  }
+  function pct(h, n, q) { const t = n * q; let c = 0; for (let i = 0; i < h.length; i++) { c += h[i]; if (c >= t) return i + .5; } return h.length - .5; }
+  const winSum = (gx, gy, w, h) => { const W1 = GW + 1; return integ[(gy + h) * W1 + gx + w] - integ[gy * W1 + gx + w] - integ[(gy + h) * W1 + gx] + integ[gy * W1 + gx]; };
+
+  function analyze(now) {
+    actx.drawImage(v, 0, 0, AW, AH);
+    const d = actx.getImageData(0, 0, AW, AH).data;
+    colH.fill(0); rowH.fill(0); grid.fill(0);
+    const thr = 62 - set.sens * .45, y0 = Math.floor(AH * set.top / 100);
+    let n = 0;
+    const L = layImg.data;
+    for (let y = 0, i = 0; y < AH; y++) for (let x = 0; x < AW; x++, i++) {
+      const p = i * 4, r = d[p], g = d[p + 1], b = d[p + 2];
+      const lum = (r * 77 + g * 150 + b * 29) >> 8;
+      const mv = hasPrev && y >= y0 && Math.abs(lum - prev[i]) > thr;
+      prev[i] = lum; mark[i] = mv ? 1 : 0; L[p + 3] = mv ? 220 : 0;
+      if (!mv) continue;
+      n++; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)]++;
+    }
+    const first = !hasPrev; hasPrev = true;
+    findColorBall(now);
+    dbg.n = n;
+    const res = { all: null, cluster: null };
+    if (first || n < AW * AH * .0008 || n > AW * AH * .45) return res;
+    res.all = { mx: pct(colH, n, .5) / AW, my: pct(rowH, n, .5) / AH,
+      x1: pct(colH, n, .12) / AW, x2: pct(colH, n, .88) / AW, y1: pct(rowH, n, .12) / AH, y2: pct(rowH, n, .88) / AH };
+
+    // densest cluster of motion (where the players crowd around the ball)
+    const W1 = GW + 1;
+    for (let gy = 0; gy < GH; gy++) { let row = 0; for (let gx = 0; gx < GW; gx++) { row += grid[gy * GW + gx]; integ[(gy + 1) * W1 + gx + 1] = integ[gy * W1 + gx + 1] + row; } }
+    const ww = Math.min(GW, SP().win[0]), wh = Math.min(GH, SP().win[1]);
+    let best = -1, bx = 0, by = 0;
+    for (let gy = 0; gy + wh <= GH; gy++) for (let gx = 0; gx + ww <= GW; gx++) { const s = winSum(gx, gy, ww, wh); if (s > best) { best = s; bx = gx; by = gy; } }
+    if (clusterWin) { const s = winSum(clusterWin.gx, clusterWin.gy, ww, wh); if (s >= best * .7) { bx = clusterWin.gx; by = clusterWin.gy; } }
+    clusterWin = { gx: bx, gy: by };
+    if (best > 0) {
+      // centroid + spread over a window twice as large around it
+      const x0 = Math.max(0, (bx - ww / 2) * CELL) | 0, x1 = Math.min(AW, (bx + ww * 1.5) * CELL) | 0;
+      const ya = Math.max(0, (by - wh / 2) * CELL) | 0, yb = Math.min(AH, (by + wh * 1.5) * CELL) | 0;
+      let c = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
+      for (let y = ya; y < yb; y++) for (let x = x0, i = y * AW + x0; x < x1; x++, i++) if (mark[i]) { c++; sx += x; sy += y; sxx += x * x; syy += y * y; }
+      if (c > 5) {
+        const mx = sx / c, my = sy / c;
+        res.cluster = { x: mx / AW, y: my / AH, sx: Math.sqrt(Math.max(0, sxx / c - mx * mx)) / AW, sy: Math.sqrt(Math.max(0, syy / c - my * my)) / AH };
+        lastCluster = res.cluster;
+      }
+    }
+
+    return res;
+  }
+
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  // Per-sport tuning. Handball: play gathers around one goal area, fast breaks cross the court in seconds,
+  // and the ball spends a lot of time in players' hands, so the crowd matters more and the view stays wider.
+  const SPORT = {
+    handball: { win: [9, 6], minFrac: .42, spread: 3.2, ballMs: 1000, ballWeight: .65, fastBreak: .11 },
+    // Basketball: smaller court, play around the key, frequent transitions, an orange ball that is easy to
+    // pick out by color, and shots that fly above the players (so the ball may be tracked above the ignored band).
+    basketball: { win: [7, 5], minFrac: .4, spread: 3.4, ballMs: 800, ballWeight: .75, fastBreak: .12, ballAboveTop: true,
+      defaultColor: { nr: .6, ng: .29, s: 330 } },
+    other:    { win: [6, 5], minFrac: .25, spread: 4,   ballMs: 700,  ballWeight: .8,  fastBreak: 0 }
+  };
+  const SP = () => SPORT[set.sport] || SPORT.other;
+
+  // Ball by color: look near the action at higher detail for a small, round blob of the registered color.
+  const cb = document.createElement('canvas'); const cbx = cb.getContext('2d', { willReadFrequently: true });
+  let cbMask = null, cbStack = null;
+  function findColorBall(now) {
+    const bc = set.ballColor || SP().defaultColor; if (!bc) { colorBall = null; return; }
+    const prevCB = colorBall && now - colorBall.t < 800 ? colorBall : null;
+    const ai = aiBall && now - aiBall.t < 1500 ? aiBall : null;
+    const ref = ai || prevCB, c = ref || { x: cam.cx, y: cam.cy };
+    const rw = clamp(srcW / Math.max(1, cam.z) * 1.6, srcW * .3, srcW), rh = rw * srcH / srcW;
+    const x0 = clamp(c.x * srcW - rw / 2, 0, srcW - rw), y0 = clamp(c.y * srcH - rh / 2, 0, srcH - rh);
+    const CW = 480, CH = Math.round(480 * srcH / srcW), N = CW * CH;
+    if (cb.width !== CW || cb.height !== CH || !cbMask) { cb.width = CW; cb.height = CH; cbMask = new Uint8Array(N); cbStack = new Int32Array(N); }
+    cbx.drawImage(v, x0, y0, rw, rh, 0, 0, CW, CH);
+    const d = cbx.getImageData(0, 0, CW, CH).data;
+    const ytop = SP().ballAboveTop ? 0 : Math.max(0, (srcH * set.top / 100 - y0) / rh * CH) * CW;
+    let cnt = 0;
+    for (let i = 0, p = 0; i < N; i++, p += 4) {
+      const r = d[p], g = d[p + 1], b = d[p + 2], s = r + g + b + 1;
+      const m = i >= ytop && Math.abs(r / s - bc.nr) < .045 && Math.abs(g / s - bc.ng) < .045 && s > bc.s * .55 && s < bc.s * 1.6;
+      cbMask[i] = m ? 1 : 0; if (m) cnt++;
+    }
+    colorBall = null; dbg.cnt = cnt;
+    if (!cnt || cnt > N * .05) return;
+    const maxA = N * .004;
+    let best = null, bestScore = 0;
+    for (let i = 0; i < N; i++) {
+      if (cbMask[i] !== 1) continue;
+      let sp = 0; cbStack[sp++] = i; cbMask[i] = 2;
+      let a = 0, sx = 0, sy = 0, minx = CW, maxx = 0, miny = CH, maxy = 0;
+      while (sp) {
+        const j = cbStack[--sp], x = j % CW, y = (j / CW) | 0;
+        a++; sx += x; sy += y; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+        if (x > 0 && cbMask[j - 1] === 1) { cbMask[j - 1] = 2; cbStack[sp++] = j - 1; }
+        if (x < CW - 1 && cbMask[j + 1] === 1) { cbMask[j + 1] = 2; cbStack[sp++] = j + 1; }
+        if (y > 0 && cbMask[j - CW] === 1) { cbMask[j - CW] = 2; cbStack[sp++] = j - CW; }
+        if (y < CH - 1 && cbMask[j + CW] === 1) { cbMask[j + CW] = 2; cbStack[sp++] = j + CW; }
+      }
+      if (a < 3 || a > maxA) continue;
+      const bw = maxx - minx + 1, bh = maxy - miny + 1, ratio = Math.min(bw, bh) / Math.max(bw, bh), fill = a / (bw * bh);
+      if (ratio < .45 || fill < .4) continue;
+      const gx = (x0 + sx / a / CW * rw) / srcW, gy = (y0 + sy / a / CH * rh) / srcH;
+      let score = ratio * fill * Math.min(1, a / 12);
+      // moving blobs are much more likely to be the ball than a cone or a bag
+      const mx = (gx * AW) | 0, my = (gy * AH) | 0; let moving = false;
+      for (let yy = Math.max(0, my - 2); yy <= Math.min(AH - 1, my + 2) && !moving; yy++) for (let xx = Math.max(0, mx - 2); xx <= Math.min(AW - 1, mx + 2); xx++) if (mark[yy * AW + xx]) { moving = true; break; }
+      if (moving) score *= 2.5;
+      if (ref) score *= 1 + 2 * Math.exp(-((gx - ref.x) ** 2 + (gy - ref.y) ** 2) / .004);
+      if (score > bestScore) { bestScore = score; best = { x: gx, y: gy, t: now }; }
+    }
+    colorBall = best;
+  }
+
+  // How fast the whole field of motion slides sideways (fast-break detector), shared by both cameras.
+  function motionVel(r, dt) {
+    if (r.all) {
+      if (prevAllX !== null && dt > 0) mv.vx += ((r.all.mx - prevAllX) / dt - mv.vx) * .15;
+      prevAllX = r.all.mx;
+    } else mv.vx *= .9;
+    // must persist ~0.4s to count (ignores jitter), then stays on briefly so the view doesn't snap back
+    const fb = SP().fastBreak;
+    if (fb && Math.abs(mv.vx) > fb) { mv.fastT += dt; if (mv.fastT > .4) mv.fastHold = .8; }
+    else { mv.fastT = 0; mv.fastHold = Math.max(0, mv.fastHold - dt); }
+  }
+  const showLabel = (label, hot) => {
+    if (cam !== viewCam() || label === trackMode) return;
+    trackMode = label; const t = $('trackTxt'); t.textContent = label; t.className = hot ? 'ball' : '';
+  };
+  function updateCam(r, dt, now) {
+    let tx = null, ty = null, frac = null, mode = '';
+    const cl = r.cluster;
+    if (set.target === 'all' && r.all) {
+      tx = r.all.mx; ty = r.all.my; mode = '動き全体';
+      frac = Math.max((r.all.x2 - r.all.x1) * 1.5 + .14, (r.all.y2 - r.all.y1) * 1.5 + .14);
+    } else if (cl) {
+      tx = cl.x; ty = cl.y; mode = '人の集まり';
+      frac = Math.max(cl.sx * SP().spread + .2, cl.sy * SP().spread + .2);
+    }
+    const sp = SP();
+    if (set.target === 'ball') {
+      const ball = aiBall && now - aiBall.t < sp.ballMs ? aiBall : colorBall && now - colorBall.t < 400 ? colorBall : null;
+      if (ball) {
+        const ref = cl || ball;
+        const bw = sp.ballWeight;
+        tx = ball.x * bw + ref.x * (1 - bw); ty = ball.y * bw + ref.y * (1 - bw);
+        mode = ball === aiBall ? 'ボール' : 'ボール(色)';
+        // keep the nearby players in frame too
+        frac = Math.max(frac || .3, Math.abs(ball.x - ref.x) * 2.2 + .22, Math.abs(ball.y - ref.y) * 2.2 + .22);
+      }
+    }
+    // fast break: the whole field of motion slides sideways quickly -> widen, lead ahead, follow faster
+    let fast = false;
+    if (sp.fastBreak && set.target !== 'all' && mv.fastHold > 0 && tx !== null) {
+      fast = true; mode = '速攻';
+      tx = clamp(tx + mv.vx * .5, 0, 1); frac = Math.max(frac || 0, .62);
+    }
+    if (frameMode === 'half') { halfCourt(tx, fast, dt); return; }
+    if (tx !== null) {
+      frac = Math.max(frac, sp.minFrac);
+      cam.last = now; cam.tx = tx; cam.ty = ty;
+      if (set.auto) cam.tz = clamp(1 / frac, 1, set.maxZoom);
+    } else if (now - cam.last > 3000) { if (set.auto) cam.tz = 1; mode = '探索中'; }
+    if (!set.auto) cam.tz = set.maxZoom;
+    if (mode) showLabel(mode, mode.startsWith('ボール') || mode === '速攻');
+    // follow the ball a little faster than the crowd
+    const base = .13 - set.smooth * .11, k = fast ? base * 1.9 : mode.startsWith('ボール') ? base * 1.35 : base;
+    const a = 1 - Math.pow(1 - k, dt * 30), az = 1 - Math.pow(1 - base * (fast ? .9 : .45), dt * 30);
+    const dead = .02 / cam.z;
+    if (Math.abs(cam.tx - cam.cx) > dead) cam.cx += (cam.tx - cam.cx) * a;
+    if (Math.abs(cam.ty - cam.cy) > dead) cam.cy += (cam.ty - cam.cy) * a;
+    cam.z += (cam.tz - cam.z) * az;
+  }
+
+  // Half-court framing: a fixed zoom that sits on the left or right half, like a TV broadcast,
+  // and pans across only when the play has clearly moved to the other side (or a fast break starts).
+  function halfCourt(ax, fast, dt) {
+    const z = set.halfZoom, w = 1 / z;
+    if (ax !== null) {
+      const want = ax > .5 ? 1 : 0;
+      const towardFast = fast && Math.sign(mv.vx) === (want ? 1 : -1);
+      if (want !== cam.side && (Math.abs(ax - .5) > .07 || towardFast)) {
+        cam.sideT += dt;
+        if (cam.sideT > (towardFast ? .1 : .7)) { cam.side = want; cam.sideT = 0; }
+      } else cam.sideT = 0;
+    }
+    cam.tx = cam.side ? 1 - w / 2 : w / 2;
+    cam.ty = (set.top / 100 + 1) / 2;
+    cam.tz = z;
+    const label = (cam.side ? '右ハーフ' : '左ハーフ') + (fast ? '・速攻' : '');
+    showLabel(label, fast);
+    const k = .05 + (1 - set.smooth) * .06;   // full pan in roughly 0.7–1.5 s
+    const a = 1 - Math.pow(1 - (fast ? k * 1.6 : k), dt * 30);
+    cam.cx += (cam.tx - cam.cx) * a; cam.cy += (cam.ty - cam.cy) * a; cam.z += (cam.tz - cam.z) * a;
+  }
+
+  let crop = { sx: 0, sy: 0, sw: 1, sh: 1 };
+  function cropOf(c) {
+    const z = Math.max(1, c.z), sw = srcW / z, sh = srcH / z;
+    return { sx: clamp(c.cx * srcW - sw / 2, 0, srcW - sw), sy: clamp(c.cy * srcH - sh / 2, 0, srcH - sh), sw, sh, z };
+  }
+  function render(c, canvas, ctx) {
+    const k = cropOf(c);
+    ctx.drawImage(v, k.sx, k.sy, k.sw, k.sh, 0, 0, canvas.width, canvas.height);
+    drawInset(canvas, ctx);
+    return k;
+  }
+  function draw(now) {
+    const vc = viewCam(), other = vc === camFree ? camHalf : camFree;
+    const otherKind = other === camFree ? 'free' : 'half';
+    crop = cropOf(vc);
+    if (sbSel) { drawSBSelect(); return; }
+    render(vc, zc, zctx);
+    // the hidden camera is only drawn while it is being recorded
+    if (recording && recKinds.includes(otherKind)) render(other, zc === zF ? zH : zF, zc === zF ? ctxH : ctxF);
+    const { sx, sy, sw, sh, z } = crop;
+    $('zoomTxt').textContent = '×' + z.toFixed(1);
+    if (!set.showOv) return;
+    const W = ov.width, H = ov.height;
+    ovx.drawImage(v, 0, 0, W, H);
+    const th = H * set.top / 100;
+    if (th > 0) {
+      ovx.fillStyle = 'rgba(0,0,0,.5)'; ovx.fillRect(0, 0, W, th);
+      ovx.strokeStyle = 'rgba(255,255,255,.3)'; ovx.lineWidth = 1; ovx.beginPath();
+      for (let x = -th; x < W; x += 7) { ovx.moveTo(x, th); ovx.lineTo(x + th, 0); } ovx.stroke();
+    }
+    // motion pixels
+    const L = layImg.data; for (let p = 0; p < L.length; p += 4) { L[p] = 255; L[p + 1] = 138; L[p + 2] = 51; }
+    lctx.putImageData(layImg, 0, 0); ovx.drawImage(lay, 0, 0, W, H);
+    // crowd
+    if (lastCluster && set.target !== 'all') {
+      ovx.setLineDash([3, 3]); ovx.strokeStyle = 'rgba(255,255,255,.8)'; ovx.lineWidth = 1;
+      const cw = (lastCluster.sx * 4 + .05) * W, ch = (lastCluster.sy * 4 + .05) * H;
+      ovx.strokeRect(lastCluster.x * W - cw / 2, lastCluster.y * H - ch / 2, cw, ch); ovx.setLineDash([]);
+    }
+    // ball
+    const ball = aiBall && now - aiBall.t < SP().ballMs ? aiBall : colorBall && now - colorBall.t < 400 ? colorBall : null;
+    if (ball && set.target === 'ball') {
+      ovx.strokeStyle = '#fff'; ovx.lineWidth = 2; ovx.beginPath(); ovx.arc(ball.x * W, ball.y * H, 6, 0, 7); ovx.stroke();
+    }
+    const o = cropOf(other);
+    ovx.strokeStyle = 'rgba(120,200,255,.9)'; ovx.lineWidth = 1;
+    ovx.strokeRect(o.sx / srcW * W, o.sy / srcH * H, o.sw / srcW * W, o.sh / srcH * H);
+    ovx.strokeStyle = '#ff7a1a'; ovx.lineWidth = 2;
+    ovx.strokeRect(sx / srcW * W, sy / srcH * H, sw / srcW * W, sh / srcH * H);
+  }
+  let last = performance.now(), lastFT = -1, newFrame = false, lastRes = { all: null, cluster: null };
+  const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+  if (useRVFC) {
+    const onF = () => { newFrame = true; v.requestVideoFrameCallback(onF); };
+    v.requestVideoFrameCallback(onF);
+  }
+  function loop(t) {
+    const dt = Math.min(.1, (t - last) / 1000); last = t;
+    if (stream && v.readyState >= 2) {
+      if (!recording && (v.videoWidth !== srcW || v.videoHeight !== srcH)) setupSize();
+      // analyze only when the camera delivered a new frame (screen may refresh faster than the camera)
+      const ft = v.currentTime;
+      if (useRVFC ? newFrame : ft !== lastFT) { newFrame = false; lastFT = ft; lastRes = analyze(t); }
+      motionVel(lastRes, dt);
+      frameMode = 'free'; cam = camFree; updateCam(lastRes, dt, t);
+      frameMode = 'half'; cam = camHalf; updateCam(lastRes, dt, t);
+      cam = viewCam(); draw(t);
+    }
+    if (recording) $('recTxt').textContent = fmt((Date.now() - recStart) / 1000);
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- ball detection AI ----------
+  let model = null, aiState = 'off', aiRuns = 0;
+  const det = document.createElement('canvas'); const dctx = det.getContext('2d');
+  const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  async function loadAI() {
+    if (aiState !== 'off' && aiState !== 'failed') return;
+    aiState = 'loading'; $('trackTxt').textContent = 'AI準備中';
+    try {
+      if (!window.tf) await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+      if (!window.cocoSsd) await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
+      await tf.ready();
+      model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+      aiState = 'ready'; trackMode = ''; aiLoop();
+    } catch (e) {
+      aiState = 'failed'; trackMode = '';
+      toast('ボール検出AIを読み込めませんでした。電波のある場所でもう一度起動してください。それまでは人の集まりを追います。', 6000);
+    }
+  }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  async function aiLoop() {
+    while (true) {
+      if (set.target === 'ball' && stream && v.readyState >= 2 && !document.hidden) {
+        try { await detectOnce(); } catch (e) {}
+      }
+      await sleep(120);
+    }
+  }
+  async function detectOnce() {
+    const now = performance.now();
+    const fresh = aiBall && now - aiBall.t < 1500;
+    // Search near the action at higher detail; every 4th run look at the whole frame.
+    aiRuns++;
+    let w, cx, cy;
+    if (aiRuns % 4 === 0 && !fresh) { w = srcW; cx = srcW / 2; cy = srcH / 2; }
+    else {
+      const c = fresh ? aiBall : { x: cam.cx, y: cam.cy };
+      w = clamp(srcW / Math.max(1, cam.z) * 1.6, srcW * .3, srcW); cx = c.x * srcW; cy = c.y * srcH;
+    }
+    const h = w * srcH / srcW;
+    const x0 = clamp(cx - w / 2, 0, srcW - w), y0 = clamp(cy - h / 2, 0, srcH - h);
+    det.width = 640; det.height = Math.round(640 * srcH / srcW);
+    dctx.drawImage(v, x0, y0, w, h, 0, 0, det.width, det.height);
+    const preds = await model.detect(det, 20, .2);
+    let best = null, bestScore = 0;
+    for (const p of preds) {
+      if (p.class !== 'sports ball') continue;
+      const [bx, by, bw, bh] = p.bbox;
+      const x = (x0 + (bx + bw / 2) / det.width * w) / srcW, y = (y0 + (by + bh / 2) / det.height * h) / srcH;
+      if (y < set.top / 100 && !SP().ballAboveTop) continue;
+      let s = p.score;
+      if (fresh) s *= 1 + .8 * Math.exp(-((x - aiBall.x) ** 2 + (y - aiBall.y) ** 2) / .01);
+      if (s > bestScore) { bestScore = s; best = { x, y, t: performance.now() }; }
+    }
+    if (best) aiBall = best;
+  }
+
+  const onBoth = (type, fn) => { zF.addEventListener(type, fn); zH.addEventListener(type, fn); };
+  // ---------- scoreboard inset ----------
+  let sbSel = null; // {a:{x,y}, b:{x,y}} while the user is outlining the scoreboard
+  function drawInset(canvas, ctx) {
+    const b = set.sb; if (!b) return;
+    const W = canvas.width, H = canvas.height, zctx = ctx;
+    const aspect = (b.w * srcW) / (b.h * srcH);
+    let dw = Math.min(W * .3, H * .22 * aspect), dh = dw / aspect;
+    const m = Math.round(W * .018), dx = W - dw - m, dy = H - dh - m;
+    zctx.fillStyle = 'rgba(0,0,0,.6)'; zctx.fillRect(dx - 3, dy - 3, dw + 6, dh + 6);
+    zctx.drawImage(v, b.x * srcW, b.y * srcH, b.w * srcW, b.h * srcH, dx, dy, dw, dh);
+    zctx.strokeStyle = 'rgba(255,255,255,.85)'; zctx.lineWidth = 2; zctx.strokeRect(dx - 1, dy - 1, dw + 2, dh + 2);
+  }
+  function drawSBSelect() {
+    const W = zc.width, H = zc.height;
+    zctx.drawImage(v, 0, 0, srcW, srcH, 0, 0, W, H);
+    if (!sbSel.a || !sbSel.b) return;
+    const x = Math.min(sbSel.a.x, sbSel.b.x) * W, y = Math.min(sbSel.a.y, sbSel.b.y) * H;
+    const w = Math.abs(sbSel.a.x - sbSel.b.x) * W, h = Math.abs(sbSel.a.y - sbSel.b.y) * H;
+    zctx.fillStyle = 'rgba(0,0,0,.5)';
+    zctx.fillRect(0, 0, W, y); zctx.fillRect(0, y + h, W, H - y - h); zctx.fillRect(0, y, x, h); zctx.fillRect(x + w, y, W - x - w, h);
+    zctx.strokeStyle = '#ff7a1a'; zctx.lineWidth = 4; zctx.strokeRect(x, y, w, h);
+  }
+  function canvasPoint(e) {
+    const rc = zc.getBoundingClientRect();
+    const scale = Math.min(rc.width / zc.width, rc.height / zc.height);
+    const dw = zc.width * scale, dh = zc.height * scale;
+    return { x: clamp((e.clientX - rc.left - (rc.width - dw) / 2) / dw, 0, 1), y: clamp((e.clientY - rc.top - (rc.height - dh) / 2) / dh, 0, 1),
+      inside: e.clientX - rc.left >= (rc.width - dw) / 2 && e.clientX - rc.left <= (rc.width + dw) / 2 && e.clientY - rc.top >= (rc.height - dh) / 2 && e.clientY - rc.top <= (rc.height + dh) / 2 };
+  }
+  onBoth('pointerdown', e => { if (!sbSel) return; e.preventDefault(); zc.setPointerCapture(e.pointerId); sbSel.a = sbSel.b = canvasPoint(e); });
+  onBoth('pointermove', e => { if (!sbSel || !sbSel.a) return; e.preventDefault(); sbSel.b = canvasPoint(e); });
+  onBoth('pointerup', e => {
+    if (!sbSel || !sbSel.a) return;
+    sbSel.b = canvasPoint(e);
+    const x = Math.min(sbSel.a.x, sbSel.b.x), y = Math.min(sbSel.a.y, sbSel.b.y), w = Math.abs(sbSel.a.x - sbSel.b.x), h = Math.abs(sbSel.a.y - sbSel.b.y);
+    if (w < .02 || h < .015) { sbSel.a = sbSel.b = null; toast('指でスコアボードを囲むようになぞってください。'); return; }
+    set.sb = { x, y, w, h }; saveSet(); endSBSelect();
+    toast('スコアボードを登録しました。右下に表示されます。');
+  });
+  function endSBSelect() { sbSel = null; document.body.classList.remove('selecting'); $('rec').disabled = !stream; $('ov').hidden = !set.showOv; paintSB(); }
+  function paintSB() { $('sbTag').hidden = !set.sb; }
+  $('pickSB').addEventListener('click', () => {
+    if (!stream) return;
+    show('settings', false); sbSel = { a: null, b: null };
+    document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true;
+    toast('全体の映像を表示しています。スコアボードを指で囲むようになぞってください。', 7000);
+  });
+  $('clearSB').addEventListener('click', () => { set.sb = null; saveSet(); paintSB(); toast('スコアボードの小窓を消しました。'); });
+
+  // ---------- ball color registration ----------
+  let picking = false;
+  const samp = document.createElement('canvas'); samp.width = samp.height = 7; const sctx = samp.getContext('2d', { willReadFrequently: true });
+  onBoth('click', e => {
+    if (!picking || !stream) return;
+    const rc = zc.getBoundingClientRect();
+    const scale = Math.min(rc.width / zc.width, rc.height / zc.height);
+    const dw = zc.width * scale, dh = zc.height * scale;
+    const px = (e.clientX - rc.left - (rc.width - dw) / 2) / dw, py = (e.clientY - rc.top - (rc.height - dh) / 2) / dh;
+    if (px < 0 || px > 1 || py < 0 || py > 1) return;
+    const sx = crop.sx + px * crop.sw, sy = crop.sy + py * crop.sh, r = Math.max(3, srcW / 400);
+    sctx.drawImage(v, sx - r, sy - r, r * 2, r * 2, 0, 0, 7, 7);
+    const d = sctx.getImageData(2, 2, 3, 3).data; let R = 0, G = 0, B = 0;
+    for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; }
+    R /= 9; G /= 9; B /= 9; const s = R + G + B + 1;
+    set.ballColor = { nr: R / s, ng: G / s, s, css: `rgb(${R | 0},${G | 0},${B | 0})` }; saveSet();
+    picking = false; document.body.classList.remove('picking'); paintSwatch();
+    const ring = document.createElement('div'); ring.id = 'tapRing'; ring.style.left = e.clientX + 'px'; ring.style.top = e.clientY + 'px';
+    document.body.appendChild(ring); setTimeout(() => ring.remove(), 700);
+    toast('ボールの色を登録しました。');
+  });
+  function paintSwatch() { const sw = $('swatch'); sw.hidden = !set.ballColor; if (set.ballColor) sw.style.background = set.ballColor.css; }
+  $('pickColor').addEventListener('click', () => {
+    picking = true; document.body.classList.add('picking'); show('settings', false);
+    toast('画面に映っているボールをタップしてください。ボールが大きく映っているときがおすすめです。', 6000);
+  });
+  $('clearColor').addEventListener('click', () => { set.ballColor = null; saveSet(); paintSwatch(); toast('ボールの色の登録を解除しました。'); });
+
+  // ---------- recording ----------
+  let recording = false, recStart = 0, recs = [], recKinds = [];
+  const fmt = s => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+  function pickMime() {
+    for (const m of ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm']) { try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (e) {} }
+    return '';
+  }
+  function makeRec(ms, kind, bps, group) {
+    const mime = pickMime();
+    const r = new MediaRecorder(ms, mime ? { mimeType: mime, videoBitsPerSecond: bps } : { videoBitsPerSecond: bps });
+    const type = r.mimeType || mime || 'video/mp4';
+    const clip = { id: `${group}-${kind}`, group, kind, mime: type, ext: type.includes('mp4') ? 'mp4' : 'webm', start: group, dur: 0, size: 0, done: false };
+    let writes = Promise.resolve();
+    r.ondataavailable = e => { if (e.data && e.data.size) { clip.size += e.data.size; writes = writes.then(() => addChunk(clip.id, e.data)).catch(() => toast('保存領域が足りないかもしれません。')); } };
+    const stopped = new Promise(res => r.onstop = res);
+    r.finish = async () => { await stopped; await writes; clip.dur = (Date.now() - group) / 1000; clip.done = true; await putClip(clip); };
+    return { r, clip };
+  }
+  async function startRec() {
+    if (!window.MediaRecorder) { toast('このiPhoneでは録画に対応していません。iOSを最新にしてください。'); return; }
+    const group = Date.now();
+    const audio = stream.getAudioTracks();
+    recs = [];
+    try {
+      recKinds = ['free', 'half', 'full'].filter(k => set.rec[k]);
+      for (const kind of ['free', 'half']) {
+        if (!set.rec[kind]) continue;
+        const canvas = kind === 'free' ? zF : zH;
+        const s = canvas.captureStream(30); audio.forEach(t => s.addTrack(t.clone()));
+        recs.push(makeRec(s, kind, canvas.width >= 1920 ? 8e6 : 5e6, group));
+      }
+      if (set.rec.full) {
+        const s = new MediaStream([...stream.getVideoTracks().map(t => t.clone()), ...audio.map(t => t.clone())]);
+        recs.push(makeRec(s, 'full', srcW >= 2560 ? 14e6 : 8e6, group));
+      }
+      for (const x of recs) { await putClip(x.clip); x.r.start(2000); }
+    } catch (e) {
+      recs.forEach(x => { try { x.r.stop(); } catch (_) {} });
+      toast('録画を始められませんでした。録画する映像を1つか2つに減らすと動く場合があります。'); recs = []; recKinds = []; return;
+    }
+    recording = true; recStart = group;
+    $('rec').classList.add('on'); $('rec').setAttribute('aria-label', '録画停止');
+    $('recPill').classList.add('on'); $('openSet').disabled = true;
+    keepAwake();
+  }
+  async function stopRec(reason) {
+    if (!recording) return;
+    recording = false;
+    $('rec').classList.remove('on'); $('rec').setAttribute('aria-label', '録画開始');
+    $('recPill').classList.remove('on'); $('recTxt').textContent = '保存中…'; $('openSet').disabled = false;
+    recs.forEach(x => { try { x.r.stop(); } catch (e) {} });
+    await Promise.all(recs.map(x => x.r.finish()));
+    recs.forEach(x => x.r.stream.getTracks().forEach(t => { if (!stream.getTracks().includes(t)) t.stop(); }));
+    recs = [];
+    $('recTxt').textContent = '待機中';
+    await refreshCount();
+    toast(reason || '録画を保存しました。録画一覧のボタンから写真に保存できます。');
+  }
+  $('rec').addEventListener('click', () => recording ? stopRec() : startRec());
+
+  let wake = null;
+  async function keepAwake() { try { if (!wake && navigator.wakeLock) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => wake = null); } } catch (e) {} }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && recording) stopRec('アプリが閉じられたため、そこまでの録画を保存しました。');
+    if (!document.hidden && stream) { keepAwake(); v.play().catch(() => {}); }
+  });
+
+  // ---------- clips UI ----------
+  async function refreshCount() {
+    try { const n = (await allClips()).filter(c => c.done).length; $('clipCount').textContent = n; $('clipCount').hidden = !n; } catch (e) {}
+  }
+  async function renderClips() {
+    const list = $('clipList'); list.innerHTML = '';
+    let clips = [];
+    const ORDER = { free: 0, half: 1, zoom: 2, full: 3 };
+    try { clips = (await allClips()).filter(c => c.done).sort((a, b) => b.start - a.start || ORDER[a.kind] - ORDER[b.kind]); } catch (e) {}
+    if (!clips.length) { const p = document.createElement('p'); p.textContent = 'まだ録画がありません。赤いボタンで録画を始めると、ここに並びます。'; list.appendChild(p); return; }
+    for (const c of clips) {
+      const d = new Date(c.start);
+      const row = document.createElement('div'); row.className = 'clip';
+      const t = document.createElement('div'); t.className = 't';
+      t.textContent = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const em = document.createElement('em'); em.className = c.kind === 'full' ? '' : 'zoom'; em.textContent = KIND_NAME[c.kind] || '録画'; t.appendChild(em);
+      const m = document.createElement('div'); m.className = 'm'; m.textContent = `${fmt(c.dur)}・${(c.size / 1048576).toFixed(0)}MB`;
+      const acts = document.createElement('div'); acts.className = 'acts';
+      const sv = document.createElement('button'); sv.className = 'btn small primary'; sv.textContent = '写真に保存';
+      sv.onclick = () => shareClip(c, sv);
+      const del = document.createElement('button'); del.className = 'btn small'; del.textContent = '削除';
+      del.onclick = async () => {
+        if (del.dataset.armed) { await deleteClip(c.id); renderClips(); refreshCount(); return; }
+        del.dataset.armed = '1'; del.textContent = '本当に削除'; setTimeout(() => { delete del.dataset.armed; del.textContent = '削除'; }, 3000);
+      };
+      acts.append(sv, del); row.append(t, acts, m); list.appendChild(row);
+    }
+  }
+  const KIND_NAME = { free: '自由ズーム', half: 'ハーフ', zoom: 'アップ', full: '全体' };
+  const blobCache = new Map();
+  async function shareClip(c, btn) {
+    // iOS needs the share call inside the tap, so the file is prepared on the first tap if needed.
+    let file = blobCache.get(c.id);
+    if (!file) {
+      btn.textContent = '準備中…';
+      const b = await clipBlob(c);
+      const d = new Date(c.start);
+      const name = `試合_${KIND_NAME[c.kind] || '録画'}_${d.getMonth() + 1}${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}.${c.ext}`;
+      file = new File([b], name, { type: c.mime }); blobCache.set(c.id, file);
+      btn.textContent = 'もう一度押して保存'; return;
+    }
+    btn.textContent = '写真に保存';
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); } catch (e) { if (e.name !== 'AbortError') toast('共有できませんでした。'); }
+    } else {
+      const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }
+  }
+
+  // ---------- sheets & settings ----------
+  const show = (id, on) => $(id).hidden = !on;
+  $('viewBtn').onclick = () => { set.frame = set.frame === 'half' ? 'free' : 'half'; saveSet(); applyUI();
+    $('frameSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === set.frame)));
+    toast(set.frame === 'half' ? 'ハーフコートを表示しています。' : '自由ズームを表示しています。', 1800); };
+  $('openSet').onclick = () => { fillCameras(); show('settings', true); };
+  $('closeSet').onclick = () => show('settings', false);
+  $('openClips').onclick = () => { renderClips(); show('clips', true); };
+  $('closeClips').onclick = () => show('clips', false);
+
+  function seg(id, key, conv) {
+    const el = $(id);
+    const paint = () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(conv(b.dataset.v) === set[key])));
+    el.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; set[key] = conv(b.dataset.v); saveSet(); paint(); applyUI(); });
+    paint();
+  }
+  seg('frameSeg', 'frame', x => x);
+  seg('sportSeg', 'sport', x => x);
+  seg('targetSeg', 'target', x => x);
+  // recording targets: each button toggles on/off, at least one stays on
+  (() => {
+    const el = $('recSeg');
+    const paint = () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(!!set.rec[b.dataset.v])));
+    el.addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      const next = { ...set.rec, [b.dataset.v]: !set.rec[b.dataset.v] };
+      if (!next.free && !next.half && !next.full) { toast('少なくとも1つは選んでください。'); return; }
+      set.rec = next; saveSet(); paint();
+    });
+    paint();
+  })();
+  seg('autoSeg', 'auto', x => x === '1');
+  seg('ovSeg', 'showOv', x => x === '1');
+  function slider(id, key, outId, label) {
+    const el = $(id); el.value = set[key];
+    const paint = () => $(outId).textContent = label(set[key]);
+    el.addEventListener('input', () => { set[key] = +el.value; saveSet(); paint(); });
+    paint();
+  }
+  slider('maxZoom', 'maxZoom', 'mzOut', x => '×' + x.toFixed(1));
+  slider('halfZoom', 'halfZoom', 'hzOut', x => '×' + x.toFixed(2));
+  slider('smooth', 'smooth', 'smOut', x => x < .3 ? 'きびきび' : x > .75 ? 'ゆったり' : 'ふつう');
+  slider('sens', 'sens', 'seOut', x => String(x));
+  slider('top', 'top', 'tpOut', x => x + '%');
+  const SPORT_NOTE = {
+    handball: 'ゴール前の攻防が切れないよう少し広めに映し、速攻で全員が走り出したら引いて先回りします。',
+    basketball: 'オレンジのボールを色でも探します。シュートで高く上がったボールも追い、速攻では引いて先回りします。色がうまく合わないときは「ボールの色」で登録してください。',
+    other: '動きの集まりとボールを標準の設定で追います。'
+  };
+  function applyUI() {
+    zc = set.frame === 'half' ? zH : zF; zctx = zc === zF ? ctxF : ctxH;
+    zF.classList.toggle('offview', zc !== zF); zH.classList.toggle('offview', zc !== zH);
+    $('viewBtn').textContent = set.frame === 'half' ? 'ハーフ' : '自由'; trackMode = '';
+    $('frameNote').textContent = set.frame === 'half'
+      ? 'いまはハーフコートを表示中です。録画する映像は下の「録画する映像」で別に選べます。'
+      : 'いまは自由ズームを表示中です。録画する映像は下の「録画する映像」で別に選べます。'; $('sportNote').textContent = SPORT_NOTE[set.sport] || ''; if (set.target === 'ball' && stream) loadAI(); $('ov').hidden = !set.showOv; $('mzLabel').textContent = set.auto ? '最大ズーム' : 'ズーム倍率'; }
+  applyUI();
+  $('camSel').addEventListener('change', async e => {
+    set.camId = e.target.value; saveSet();
+    try { await startCamera(); toast('カメラを切り替えました。'); } catch (err) { toast('このカメラは使えませんでした。'); }
+  });
+
+  // ---------- start ----------
+  $('startBtn').onclick = async () => {
+    const err = $('startErr'); err.hidden = true;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      err.textContent = 'この画面ではカメラが使えません。SafariでこのページのURLを開いてください。'; err.hidden = false; return;
+    }
+    $('startBtn').textContent = '起動中…';
+    try {
+      await startCamera();
+      show('start', false); $('rec').disabled = false; keepAwake();
+      if (set.target === 'ball') loadAI(); else $('trackTxt').textContent = '追跡中';
+      if (Math.max(srcW, srcH) < 1920) toast(`カメラの解像度が${srcW}×${srcH}です。アップにすると粗く見えるかもしれません。`, 5000);
+    } catch (e) {
+      $('startBtn').textContent = 'もう一度試す';
+      err.textContent = e && e.name === 'NotAllowedError'
+        ? 'カメラの使用が許可されていません。iPhoneの「設定」→「Safari」→「カメラ」を「許可」にしてから、もう一度試してください。'
+        : 'カメラを起動できませんでした。ほかのアプリでカメラを使っていたら閉じてから試してください。';
+      err.hidden = false;
+    }
+  };
+
+  // In Safari (not yet added to the home screen), show how to install it.
+  const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+  if (!standalone) $('install').hidden = false;
+  paintSwatch(); paintSB();
+  refreshCount();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
