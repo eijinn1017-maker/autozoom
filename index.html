@@ -243,9 +243,13 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let zc = zF, zctx = ctxF;   // the canvas currently shown on screen
 
   // ---------- settings ----------
-  const DEF = { frame: 'free', rec: { free: true, half: true, full: false }, halfZoom: 1.8, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .45, sens: 50, top: 20, showOv: true, camId: '' };
+  const DEF = { frame: 'free', rec: { free: true, half: true, full: false }, halfZoom: 1.8, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 2, sens: 50, top: 20, showOv: true, camId: '' };
   let set = { ...DEF };
-  try { Object.assign(set, JSON.parse(localStorage.getItem('az-set') || '{}')); } catch (e) {}
+  try {
+    const saved = JSON.parse(localStorage.getItem('az-set') || '{}');
+    if (saved.ver !== 2) { delete saved.smooth; saved.ver = 2; }   // calmer default after update
+    Object.assign(set, saved);
+  } catch (e) {}
   const saveSet = () => { try { localStorage.setItem('az-set', JSON.stringify(set)); } catch (e) {} };
 
   // ---------- toast ----------
@@ -315,7 +319,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   const lay = document.createElement('canvas'); const lctx = lay.getContext('2d');
   let prev, mark, colH, rowH, grid, integ, layImg, hasPrev = false;
   // two virtual cameras run side by side on the same analysis: free zoom and half court
-  const newCam = () => ({ cx: .5, cy: .6, z: 1, tx: .5, ty: .6, tz: 1, last: 0, side: 0, sideT: 0 });
+  const newCam = () => ({ cx: .5, cy: .6, z: 1, pvx: 0, pvy: 0, pvz: 0, ax: .5, ay: .6, az: 1, ftx: null, fty: null, fz: 1,
+    zT: 0, born: performance.now(), last: 0, side: 0, sideT: 0, sideAt: 0, fhx: null });
   const camFree = newCam(), camHalf = newCam();
   let cam = camFree, frameMode = 'free';
   const viewCam = () => set.frame === 'half' ? camHalf : camFree;
@@ -333,6 +338,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     grid = new Uint32Array(GW * GH); integ = new Uint32Array((GW + 1) * (GH + 1));
     layImg = lctx.createImageData(AW, AH);
     hasPrev = false; clusterWin = null; prevAllX = null; mv.vx = 0;
+    Object.assign(camFree, newCam()); Object.assign(camHalf, newCam());
     const big = Math.max(srcW, srcH) >= 2560;
     const ow = srcW >= srcH ? (big ? 1920 : 1280) : (big ? 1080 : 720);
     for (const c of [zF, zH]) { c.width = ow; c.height = Math.round(ow * srcH / srcW); }
@@ -464,8 +470,12 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (fb && Math.abs(mv.vx) > fb) { mv.fastT += dt; if (mv.fastT > .4) mv.fastHold = .8; }
     else { mv.fastT = 0; mv.fastHold = Math.max(0, mv.fastHold - dt); }
   }
+  let pendLabel = '', pendAt = 0;
   const showLabel = (label, hot) => {
-    if (cam !== viewCam() || label === trackMode) return;
+    if (cam !== viewCam()) return;
+    const now = performance.now();
+    if (label !== pendLabel) { pendLabel = label; pendAt = now; }
+    if (label === trackMode || (now - pendAt < 500 && trackMode)) return;
     trackMode = label; const t = $('trackTxt'); t.textContent = label; t.className = hot ? 'ball' : '';
   };
   function updateCam(r, dt, now) {
@@ -496,43 +506,66 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       fast = true; mode = '速攻';
       tx = clamp(tx + mv.vx * .5, 0, 1); frac = Math.max(frac || 0, .62);
     }
-    if (frameMode === 'half') { halfCourt(tx, fast, dt); return; }
+    if (frameMode === 'half') { halfCourt(tx, fast, dt, now); return; }
+    const sm = set.smooth;
     if (tx !== null) {
       frac = Math.max(frac, sp.minFrac);
-      cam.last = now; cam.tx = tx; cam.ty = ty;
-      if (set.auto) cam.tz = clamp(1 / frac, 1, set.maxZoom);
-    } else if (now - cam.last > 3000) { if (set.auto) cam.tz = 1; mode = '探索中'; }
-    if (!set.auto) cam.tz = set.maxZoom;
+      cam.last = now;
+      if (cam.ftx === null) { cam.ftx = cam.ax = cam.cx = tx; cam.fty = cam.ay = cam.cy = ty; }
+      // 1) calm the raw target: detections wobble frame to frame
+      const f = 1 - Math.exp(-dt / (lerp(.25, .9, sm) * (fast ? .5 : 1)));
+      cam.ftx += (tx - cam.ftx) * f; cam.fty += (ty - cam.fty) * f;
+      if (set.auto) cam.fz += (clamp(1 / frac, 1, set.maxZoom) - cam.fz) * (1 - Math.exp(-dt / lerp(.8, 2, sm)));
+    } else if (now - cam.last > 3000) {
+      if (set.auto) cam.fz += (1 - cam.fz) * (1 - Math.exp(-dt / 1.5));
+      mode = '探索中';
+    }
+    if (!set.auto) cam.fz = set.maxZoom;
+    // 2) zoom only in noticeable steps, at most every 2 s (and not during the first moments)
+    if (!set.auto) cam.az = cam.fz;
+    else if (now - cam.born > 1500 && now - cam.zT > 2000 && Math.abs(Math.log(cam.fz / cam.az)) > .15) { cam.az = cam.fz; cam.zT = now; }
+    // 3) lazy dead zone: the camera stays put while the action moves inside the middle of the frame
+    if (cam.ftx !== null) {
+      const hw = .5 / Math.max(1, cam.az), bx = hw * (fast ? .08 : .32), by = hw * .3;
+      if (fast) cam.ax = cam.ftx;
+      else if (cam.ftx > cam.ax + bx) cam.ax = cam.ftx - bx * .5;
+      else if (cam.ftx < cam.ax - bx) cam.ax = cam.ftx + bx * .5;
+      if (cam.fty > cam.ay + by) cam.ay = cam.fty - by * .5;
+      else if (cam.fty < cam.ay - by) cam.ay = cam.fty + by * .5;
+      cam.ax = clamp(cam.ax, hw, 1 - hw); cam.ay = clamp(cam.ay, hw, 1 - hw);
+    }
     if (mode) showLabel(mode, mode.startsWith('ボール') || mode === '速攻');
-    // follow the ball a little faster than the crowd
-    const base = .13 - set.smooth * .11, k = fast ? base * 1.9 : mode.startsWith('ボール') ? base * 1.35 : base;
-    const a = 1 - Math.pow(1 - k, dt * 30), az = 1 - Math.pow(1 - base * (fast ? .9 : .45), dt * 30);
-    const dead = .02 / cam.z;
-    if (Math.abs(cam.tx - cam.cx) > dead) cam.cx += (cam.tx - cam.cx) * a;
-    if (Math.abs(cam.ty - cam.cy) > dead) cam.cy += (cam.ty - cam.cy) * a;
-    cam.z += (cam.tz - cam.z) * az;
+    // 4) move like a camera operator: ease in and ease out, never jump
+    const wp = lerp(2.6, 1, sm) * (fast ? 1.8 : 1), wz = lerp(1.4, .55, sm);
+    damp(cam, 'cx', 'pvx', cam.ax, wp, dt); damp(cam, 'cy', 'pvy', cam.ay, wp, dt); damp(cam, 'z', 'pvz', cam.az, wz, dt);
+  }
+  const lerp = (a, b, t) => a + (b - a) * t;
+  // critically damped spring: smooth start, smooth stop, no overshoot
+  function damp(c, k, vk, target, w, dt) {
+    const d = c[k] - target, e = Math.exp(-w * dt), t = (c[vk] + w * d) * dt;
+    c[vk] = (c[vk] - w * t) * e; c[k] = target + (d + t) * e;
   }
 
-  // Half-court framing: a fixed zoom that sits on the left or right half, like a TV broadcast,
-  // and pans across only when the play has clearly moved to the other side (or a fast break starts).
-  function halfCourt(ax, fast, dt) {
-    const z = set.halfZoom, w = 1 / z;
+  // Half-court framing: sits on the left or right half like a TV broadcast and pans across
+  // only when play has clearly moved to the other side for a while (or a fast break starts).
+  function halfCourt(ax, fast, dt, now) {
+    const z = set.halfZoom, w = 1 / z, sm = set.smooth;
+    const sideX = s => s ? 1 - w / 2 : w / 2;
     if (ax !== null) {
-      const want = ax > .5 ? 1 : 0;
+      if (cam.fhx === null) { cam.fhx = ax; cam.side = ax > .5 ? 1 : 0; cam.cx = sideX(cam.side); cam.z = z; cam.sideAt = now; }
+      cam.fhx += (ax - cam.fhx) * (1 - Math.exp(-dt / lerp(.4, 1, sm)));
+      const want = cam.fhx > .5 ? 1 : 0;
       const towardFast = fast && Math.sign(mv.vx) === (want ? 1 : -1);
-      if (want !== cam.side && (Math.abs(ax - .5) > .07 || towardFast)) {
+      if (want !== cam.side && (towardFast || (Math.abs(cam.fhx - .5) > .08 && now - cam.sideAt > 2500))) {
         cam.sideT += dt;
-        if (cam.sideT > (towardFast ? .1 : .7)) { cam.side = want; cam.sideT = 0; }
-      } else cam.sideT = 0;
+        if (cam.sideT > (towardFast ? .15 : lerp(.8, 1.6, sm))) { cam.side = want; cam.sideT = 0; cam.sideAt = now; }
+      } else cam.sideT = Math.max(0, cam.sideT - dt);
     }
-    cam.tx = cam.side ? 1 - w / 2 : w / 2;
-    cam.ty = (set.top / 100 + 1) / 2;
-    cam.tz = z;
-    const label = (cam.side ? '右ハーフ' : '左ハーフ') + (fast ? '・速攻' : '');
-    showLabel(label, fast);
-    const k = .05 + (1 - set.smooth) * .06;   // full pan in roughly 0.7–1.5 s
-    const a = 1 - Math.pow(1 - (fast ? k * 1.6 : k), dt * 30);
-    cam.cx += (cam.tx - cam.cx) * a; cam.cy += (cam.ty - cam.cy) * a; cam.z += (cam.tz - cam.z) * a;
+    showLabel((cam.side ? '右ハーフ' : '左ハーフ') + (fast ? '・速攻' : ''), fast);
+    const wp = lerp(2.4, 1.2, sm) * (fast ? 1.6 : 1);
+    damp(cam, 'cx', 'pvx', sideX(cam.side), wp, dt);
+    damp(cam, 'cy', 'pvy', (set.top / 100 + 1) / 2, 2, dt);
+    damp(cam, 'z', 'pvz', z, 2, dt);
   }
 
   let crop = { sx: 0, sy: 0, sw: 1, sh: 1 };
