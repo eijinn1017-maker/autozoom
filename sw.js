@@ -1,5 +1,5 @@
 // Keeps the app working at the field even with weak signal.
-const CACHE = 'autozoom-v8';
+const CACHE = 'autozoom-v9';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -150,6 +150,11 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       <select id="camSel"></select>
     </div>
     <div class="row">
+      <label>画質</label>
+      <div class="seg" id="qualSeg"><button data-v="std">なめらか（標準）</button><button data-v="high">高画質（4K）</button></div>
+      <small>映像がカクカクするときは「なめらか」に。高画質はアップがきれいですが、iPhoneに負担がかかります。</small>
+    </div>
+    <div class="row">
       <label>競技</label>
       <div class="seg" id="sportSeg"><button data-v="handball">ハンドボール</button><button data-v="basketball">バスケ</button><button data-v="other">その他</button></div>
       <small id="sportNote"></small>
@@ -243,7 +248,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let zc = zF, zctx = ctxF;   // the canvas currently shown on screen
 
   // ---------- settings ----------
-  const DEF = { frame: 'free', rec: { free: true, half: true, full: false }, halfZoom: 1.8, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 2, sens: 50, top: 20, showOv: true, camId: '' };
+  const DEF = { frame: 'free', rec: { free: true, half: true, full: false }, halfZoom: 1.8, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 2, quality: 'std', sens: 50, top: 20, showOv: true, camId: '' };
   let set = { ...DEF };
   try {
     const saved = JSON.parse(localStorage.getItem('az-set') || '{}');
@@ -288,7 +293,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let stream = null, srcW = 1920, srcH = 1080;
   async function startCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
-    const video = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } };
+    const hq = set.quality === 'high';
+    const video = { width: { ideal: hq ? 3840 : 1920 }, height: { ideal: hq ? 2160 : 1080 }, frameRate: { ideal: 30 } };
     if (set.camId) video.deviceId = { exact: set.camId }; else video.facingMode = { ideal: 'environment' };
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
@@ -347,7 +353,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   function pct(h, n, q) { const t = n * q; let c = 0; for (let i = 0; i < h.length; i++) { c += h[i]; if (c >= t) return i + .5; } return h.length - .5; }
   const winSum = (gx, gy, w, h) => { const W1 = GW + 1; return integ[(gy + h) * W1 + gx + w] - integ[gy * W1 + gx + w] - integ[(gy + h) * W1 + gx] + integ[gy * W1 + gx]; };
 
-  function analyze(now) {
+  function analyze(now, withColor) {
     actx.drawImage(v, 0, 0, AW, AH);
     const d = actx.getImageData(0, 0, AW, AH).data;
     colH.fill(0); rowH.fill(0); grid.fill(0);
@@ -363,7 +369,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       n++; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)]++;
     }
     const first = !hasPrev; hasPrev = true;
-    findColorBall(now);
+    if (withColor) findColorBall(now);
     dbg.n = n;
     const res = { all: null, cluster: null };
     if (first || n < AW * AH * .0008 || n > AW * AH * .45) return res;
@@ -579,7 +585,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     drawInset(canvas, ctx);
     return k;
   }
-  function draw(now) {
+  function draw(now, withOv) {
     const vc = viewCam(), other = vc === camFree ? camHalf : camFree;
     const otherKind = other === camFree ? 'free' : 'half';
     crop = cropOf(vc);
@@ -589,9 +595,9 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (recording && recKinds.includes(otherKind)) render(other, zc === zF ? zH : zF, zc === zF ? ctxH : ctxF);
     const { sx, sy, sw, sh, z } = crop;
     $('zoomTxt').textContent = '×' + z.toFixed(1);
-    if (!set.showOv) return;
+    if (!set.showOv || !withOv) return;
     const W = ov.width, H = ov.height;
-    ovx.drawImage(v, 0, 0, W, H);
+    ovx.drawImage(ana, 0, 0, W, H);   // reuse the small analysis picture instead of decoding the camera again
     const th = H * set.top / 100;
     if (th > 0) {
       ovx.fillStyle = 'rgba(0,0,0,.5)'; ovx.fillRect(0, 0, W, th);
@@ -624,17 +630,23 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     const onF = () => { newFrame = true; v.requestVideoFrameCallback(onF); };
     v.requestVideoFrameCallback(onF);
   }
+  let frameNo = 0;
   function loop(t) {
-    const dt = Math.min(.1, (t - last) / 1000); last = t;
     if (stream && v.readyState >= 2) {
       if (!recording && (v.videoWidth !== srcW || v.videoHeight !== srcH)) setupSize();
-      // analyze only when the camera delivered a new frame (screen may refresh faster than the camera)
+      // Do nothing until the camera has a new picture: the screen refreshes faster than the camera,
+      // and redrawing the same picture twice only costs time.
       const ft = v.currentTime;
-      if (useRVFC ? newFrame : ft !== lastFT) { newFrame = false; lastFT = ft; lastRes = analyze(t); }
-      motionVel(lastRes, dt);
-      frameMode = 'free'; cam = camFree; updateCam(lastRes, dt, t);
-      frameMode = 'half'; cam = camHalf; updateCam(lastRes, dt, t);
-      cam = viewCam(); draw(t);
+      if (useRVFC ? newFrame : ft !== lastFT) {
+        newFrame = false; lastFT = ft; frameNo++;
+        const dt = Math.min(.1, (t - last) / 1000); last = t;
+        // motion analysis 15 times a second is plenty; the picture itself stays at full speed
+        if (frameNo % 2 === 0) lastRes = analyze(t, frameNo % 6 === 0);
+        motionVel(lastRes, dt);
+        frameMode = 'free'; cam = camFree; updateCam(lastRes, dt, t);
+        frameMode = 'half'; cam = camHalf; updateCam(lastRes, dt, t);
+        cam = viewCam(); draw(t, frameNo % 3 === 0);
+      }
     }
     if (recording) $('recTxt').textContent = fmt((Date.now() - recStart) / 1000);
     requestAnimationFrame(loop);
@@ -664,7 +676,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       if (set.target === 'ball' && stream && v.readyState >= 2 && !document.hidden) {
         try { await detectOnce(); } catch (e) {}
       }
-      await sleep(120);
+      await sleep(recording ? 450 : 250);
     }
   }
   async function detectOnce() {
@@ -680,7 +692,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     }
     const h = w * srcH / srcW;
     const x0 = clamp(cx - w / 2, 0, srcW - w), y0 = clamp(cy - h / 2, 0, srcH - h);
-    det.width = 640; det.height = Math.round(640 * srcH / srcW);
+    det.width = 320; det.height = Math.round(320 * srcH / srcW);
     dctx.drawImage(v, x0, y0, w, h, 0, 0, det.width, det.height);
     const preds = await model.detect(det, 20, .2);
     let best = null, bestScore = 0;
@@ -908,6 +920,11 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     paint();
   }
   seg('frameSeg', 'frame', x => x);
+  seg('qualSeg', 'quality', x => x);   // updates the setting first, then the camera restarts below
+  $('qualSeg').addEventListener('click', async e => {
+    const b = e.target.closest('button'); if (!b || !stream || recording) return;
+    try { await startCamera(); toast(set.quality === 'high' ? '高画質に切り替えました。' : 'なめらかに切り替えました。'); } catch (err) { toast('カメラを切り替えられませんでした。'); }
+  });
   seg('sportSeg', 'sport', x => x);
   seg('targetSeg', 'target', x => x);
   // recording targets: each button toggles on/off, at least one stays on
