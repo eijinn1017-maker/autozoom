@@ -46,6 +46,15 @@ button{font:inherit;color:inherit;cursor:pointer}
 #tapRing{position:fixed;width:56px;height:56px;margin:-28px 0 0 -28px;border:3px solid var(--bib);border-radius:50%;pointer-events:none}
 body.picking canvas{cursor:crosshair}
 body.selecting canvas{touch-action:none;cursor:crosshair}
+body.selecting #rail,body.selecting #hud{display:none}
+body.selecting #toast{top:calc(var(--st) + 12px);bottom:auto}
+#quadBar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--sb) + 14px);background:rgba(10,14,11,.88);border:1px solid var(--line);
+  border-radius:12px;padding:8px 10px 8px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 24px);font-size:13px}
+#quadBar div{display:flex;gap:8px}
+@media (orientation:landscape){
+  #quadBar{left:auto;bottom:auto;right:calc(var(--sr) + 10px);top:50%;transform:translateY(-50%);flex-direction:column;width:118px;padding:10px;text-align:center}
+  #quadBar div{flex-direction:column;width:100%}
+}
 .tag{font-size:12px;background:var(--pitch);color:#fff;border-radius:5px;padding:1px 7px;margin-left:8px;font-weight:700}
 
 /* control rail: right side in landscape, bottom in portrait */
@@ -195,7 +204,12 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     <div class="row" data-for="half">
       <label>コートの範囲<span class="tag" id="courtTag" hidden>登録済み</span></label>
       <div class="seg"><button id="pickCourt">コートを囲む</button><button id="clearCourt">解除</button></div>
-      <small>コートの外側の線（両方のゴールを含む）を指で囲んでください。左右のハーフは、ゴールと中央線が必ず入るように自動で決まります。</small>
+      <small>4つの角の丸を、コートの四隅に指で動かして合わせます。左右のハーフは、ゴールと中央線が必ず入るように自動で決まります。</small>
+    </div>
+    <div class="row" data-for="half">
+      <label for="upAmt">アップの強さ<output id="upOut"></output></label>
+      <input type="range" id="upAmt" min="1" max="1.8" step="0.05">
+      <small>ゴール前で攻めている間は、ゴールを入れたまま少し寄ります。一番左にすると寄りません。</small>
     </div>
     <div class="row" data-for="free">
       <label>ズームの決め方</label>
@@ -238,6 +252,10 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   </div>
 </div>
 
+<div id="quadBar" hidden>
+  <span>丸を動かしてコートの四隅に合わせてください</span>
+  <div><button class="btn small" id="quadCancel">キャンセル</button><button class="btn small primary" id="quadOk">決定</button></div>
+</div>
 <div id="toast" hidden role="status"></div>
 
 <script>
@@ -248,7 +266,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let zc = zF, zctx = ctxF;   // the canvas currently shown on screen
 
   // ---------- settings ----------
-  const DEF = { frame: 'half', rec: { free: false, half: true, full: false }, court: null, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 3, quality: 'std', sens: 50, top: 20, showOv: true, camId: '' };
+  const DEF = { frame: 'half', rec: { free: false, half: true, full: false }, court: null, up: 1.35, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 3, quality: 'std', sens: 50, top: 20, showOv: true, camId: '' };
   let set = { ...DEF };
   try {
     const saved = JSON.parse(localStorage.getItem('az-set') || '{}');
@@ -355,20 +373,38 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   function pct(h, n, q) { const t = n * q; let c = 0; for (let i = 0; i < h.length; i++) { c += h[i]; if (c >= t) return i + .5; } return h.length - .5; }
   const winSum = (gx, gy, w, h) => { const W1 = GW + 1; return integ[(gy + h) * W1 + gx + w] - integ[gy * W1 + gx + w] - integ[(gy + h) * W1 + gx] + integ[gy * W1 + gx]; };
 
+  let maskBuf = null, maskKey = '';
+  function courtMask() {
+    const key = JSON.stringify([set.court, set.top, AW, AH]);
+    if (key === maskKey && maskBuf) return maskBuf;
+    maskKey = key; maskBuf = new Uint8Array(AW * AH);
+    if (!set.court) { const y0 = Math.floor(AH * set.top / 100); maskBuf.fill(1, y0 * AW); return maskBuf; }
+    const g = courtGeom(), cx = (g.tm[0] + g.bm[0]) / 2, cy = (g.tm[1] + g.bm[1]) / 2;
+    const grow = p => [cx + (p[0] - cx) * 1.06, cy + (p[1] - cy) * 1.06];
+    const head = g.depth * .18;
+    const poly = [grow(g.TL), grow(g.TR), grow(g.BR), grow(g.BL)].map(p => [p[0] * AW, p[1] * AH]);
+    poly[0][1] -= head * AH; poly[1][1] -= head * AH;
+    for (let y = 0, i = 0; y < AH; y++) for (let x = 0; x < AW; x++, i++) {
+      let inside = false;
+      for (let a = 0, b = 3; a < 4; b = a++) {
+        const [xa, ya] = poly[a], [xb, yb] = poly[b];
+        if ((ya > y) !== (yb > y) && x < (xb - xa) * (y - ya) / (yb - ya) + xa) inside = !inside;
+      }
+      maskBuf[i] = inside ? 1 : 0;
+    }
+    return maskBuf;
+  }
   function analyze(now, withColor) {
     actx.drawImage(v, 0, 0, AW, AH);
     const d = actx.getImageData(0, 0, AW, AH).data;
     colH.fill(0); rowH.fill(0); grid.fill(0);
-    const thr = 62 - set.sens * .45, cr = set.court;
-    const y0 = cr ? Math.max(0, Math.floor(AH * (cr.y - cr.h * .08))) : Math.floor(AH * set.top / 100);
-    const y1 = cr ? Math.min(AH, Math.ceil(AH * (cr.y + cr.h * 1.05))) : AH;
-    const x0 = cr ? Math.max(0, Math.floor(AW * (cr.x - cr.w * .03))) : 0, x1 = cr ? Math.min(AW, Math.ceil(AW * (cr.x + cr.w * 1.03))) : AW;
+    const thr = 62 - set.sens * .45, mask = courtMask();
     let n = 0;
     const L = layImg.data;
     for (let y = 0, i = 0; y < AH; y++) for (let x = 0; x < AW; x++, i++) {
       const p = i * 4, r = d[p], g = d[p + 1], b = d[p + 2];
       const lum = (r * 77 + g * 150 + b * 29) >> 8;
-      const mv = hasPrev && y >= y0 && y < y1 && x >= x0 && x < x1 && Math.abs(lum - prev[i]) > thr;
+      const mv = hasPrev && mask[i] === 1 && Math.abs(lum - prev[i]) > thr;
       prev[i] = lum; mark[i] = mv ? 1 : 0; L[p + 3] = mv ? 220 : 0;
       if (!mv) continue;
       n++; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)]++;
@@ -517,7 +553,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       fast = true; mode = '速攻';
       tx = clamp(tx + mv.vx * .5, 0, 1); frac = Math.max(frac || 0, .62);
     }
-    if (frameMode === 'half') { halfCourt(tx, fast, dt, now); return; }
+    if (frameMode === 'half') { halfCourt(tx, ty, frac, fast, dt, now); return; }
     const sm = set.smooth;
     if (tx !== null) {
       frac = Math.max(frac, sp.minFrac);
@@ -559,36 +595,78 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   // Half-court framing: sits on the left or right half like a TV broadcast and pans across
   // only when play has clearly moved to the other side for a while (or a fast break starts).
-  // The court as registered by the user, or (until then) everything below the ignored top band.
-  const courtRect = () => set.court || { x: 0, y: set.top / 100, w: 1, h: 1 - set.top / 100 };
-  // One half: from just behind the goal to a little past the centre line, full court height,
-  // in the camera's own shape (so nothing is ever cut off: if needed it simply zooms in less).
-  function halfFrame(side) {
-    const c = courtRect();
-    const cw = c.w * .5 + c.w * .1 + c.w * .04, ch = c.h * 1.12;
-    const z = clamp(1 / Math.max(cw, ch), 1, 4), w = 1 / z;
-    const cx = side ? c.x + c.w * 1.04 - w / 2 : c.x - c.w * .04 + w / 2;
-    return { cx, cy: c.y + c.h / 2, z };
+  // ---------- court geometry ----------
+  // The court is four corners (top-left, top-right, bottom-right, bottom-left) as seen by the camera.
+  // From a seat in the stands the court looks like a trapezoid, so a rectangle is not enough.
+  const mixp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  function courtQuad() {
+    const c = set.court;
+    if (c && c.pts) return c.pts;
+    if (c && c.w) return [[c.x, c.y], [c.x + c.w, c.y], [c.x + c.w, c.y + c.h], [c.x, c.y + c.h]];   // older rectangle
+    const t = set.top / 100; return [[0, t], [1, t], [1, 1], [0, 1]];
   }
-  function halfCourt(ax, fast, dt, now) {
-    const sm = set.smooth, c = courtRect(), mid = c.x + c.w / 2;
+  function courtGeom() {
+    const [TL, TR, BR, BL] = courtQuad();
+    return { TL, TR, BR, BL, tm: mixp(TL, TR, .5), bm: mixp(BL, BR, .5), gL: mixp(TL, BL, .5), gR: mixp(TR, BR, .5),
+      len: Math.max(TR[0] - TL[0], BR[0] - BL[0]), depth: Math.max(BL[1] - TL[1], BR[1] - TR[1]) };
+  }
+  // signed distance from the centre line: > 0 means the right half
+  function sideDist(g, x, y) {
+    const dx = g.bm[0] - g.tm[0], dy = g.bm[1] - g.tm[1], l = Math.hypot(dx, dy) || 1;
+    return -(dx * (y - g.tm[1]) - dy * (x - g.tm[0])) / l;
+  }
+  // One half: from just behind the goal to a little past the centre line, the full depth of the court,
+  // in the camera's own shape, so the goal is never cut off.
+  function halfFrame(side) {
+    const g = courtGeom();
+    const pts = side ? [g.TR, g.BR, mixp(g.TL, g.TR, .4), mixp(g.BL, g.BR, .4)] : [g.TL, g.BL, mixp(g.TL, g.TR, .6), mixp(g.BL, g.BR, .6)];
+    let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0]));
+    let y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
+    y0 -= (y1 - y0) * .1;                       // room for players standing on the far line
+    if (side) x1 += g.len * .04; else x0 -= g.len * .04;
+    const cw = x1 - x0, ch = (y1 - y0) * 1.08;
+    const z = clamp(1 / Math.max(cw, ch), 1, 4), w = 1 / z;
+    return { cx: side ? x1 - w / 2 : x0 + w / 2, cy: (y0 + y1) / 2, z, x0, x1, y0, y1, goal: side ? g.gR : g.gL, g };
+  }
+  function halfCourt(ax, ay, frac, fast, dt, now) {
+    const sm = set.smooth, g = courtGeom();
     if (ax !== null) {
-      if (cam.fhx === null) { cam.fhx = ax; cam.side = ax > mid ? 1 : 0; Object.assign(cam, halfFrame(cam.side)); cam.sideAt = now; }
-      cam.fhx += (ax - cam.fhx) * (1 - Math.exp(-dt / lerp(.4, 1, sm)));
-      const want = cam.fhx > mid ? 1 : 0;
+      if (cam.fhx === null) { cam.fhx = ax; cam.fhy = ay; cam.side = sideDist(g, ax, ay) > 0 ? 1 : 0; Object.assign(cam, halfFrame(cam.side)); cam.sideAt = now; }
+      const f = 1 - Math.exp(-dt / lerp(.4, 1, sm));
+      cam.fhx += (ax - cam.fhx) * f; cam.fhy += (ay - cam.fhy) * f;
+      const sd = sideDist(g, cam.fhx, cam.fhy), want = sd > 0 ? 1 : 0;
       const towardFast = fast && Math.sign(mv.vx) === (want ? 1 : -1);
       // stay on a side at least 3 s (a shot and the goal it ends in happen on one side)
-      if (want !== cam.side && (towardFast || (Math.abs(cam.fhx - mid) > c.w * .08 && now - cam.sideAt > 3000))) {
+      if (want !== cam.side && (towardFast || (Math.abs(sd) > g.len * .08 && now - cam.sideAt > 3000))) {
         cam.sideT += dt;
-        if (cam.sideT > (towardFast ? .15 : lerp(.8, 1.6, sm))) { cam.side = want; cam.sideT = 0; cam.sideAt = now; }
+        if (cam.sideT > (towardFast ? .15 : lerp(.8, 1.6, sm))) { cam.side = want; cam.sideT = 0; cam.sideAt = now; cam.aez = cam.fez = 1; }
       } else cam.sideT = Math.max(0, cam.sideT - dt);
     }
-    showLabel((cam.side ? '右ハーフ' : '左ハーフ') + (fast ? '・速攻' : ''), fast);
+    const hf = halfFrame(cam.side), hw = 1 / hf.z, gx = hf.goal[0], gy = hf.goal[1];
+    // Close-up: while the attack is near this goal, zoom in a little but always keep the goal in the picture.
+    let ez = 1;
+    if (set.up > 1.01 && !fast && ax !== null && (sideDist(g, cam.fhx, cam.fhy) > 0 ? 1 : 0) === cam.side && frac) {
+      const nearGoal = Math.abs(cam.fhx - gx) / Math.max(.05, Math.abs((g.tm[0] + g.bm[0]) / 2 - gx));
+      if (nearGoal < .75) ez = clamp(hw / Math.max(frac, .18), 1, set.up);
+    }
+    if (cam.fez == null) { cam.fez = cam.aez = 1; cam.ezT = 0; }
+    cam.fez += (ez - cam.fez) * (1 - Math.exp(-dt / 1.2));
+    if (Math.abs(Math.log(cam.fez / cam.aez)) > .1 && now - cam.ezT > 2000) { cam.aez = cam.fez; cam.ezT = now; }
+    const z2 = hf.z * cam.aez, w2 = 1 / z2, m = g.len * .03, my = g.depth * .06;
+    let cx, cy;
+    if (cam.aez < 1.02) { cx = hf.cx; cy = hf.cy; }
+    else {
+      const lo = Math.max(hf.cx - hw / 2 + w2 / 2, cam.side ? gx + m - w2 / 2 : -1);
+      const hi = Math.min(hf.cx + hw / 2 - w2 / 2, cam.side ? 2 : gx - m + w2 / 2);
+      cx = clamp(cam.fhx, Math.min(lo, hi), Math.max(lo, hi));
+      const vlo = Math.max(hf.cy - hw / 2 + w2 / 2, gy + my - w2 / 2), vhi = Math.min(hf.cy + hw / 2 - w2 / 2, gy - my + w2 / 2);
+      cy = clamp(cam.fhy, Math.min(vlo, vhi), Math.max(vlo, vhi));
+    }
+    showLabel((cam.side ? '右ハーフ' : '左ハーフ') + (fast ? '・速攻' : cam.aez > 1.05 ? '・アップ' : ''), fast);
     const wp = lerp(2.4, 1.2, sm) * (fast ? 1.6 : 1);
-    const hf = halfFrame(cam.side);
-    damp(cam, 'cx', 'pvx', hf.cx, wp, dt);
-    damp(cam, 'cy', 'pvy', hf.cy, 2, dt);
-    damp(cam, 'z', 'pvz', hf.z, 2, dt);
+    damp(cam, 'cx', 'pvx', cx, wp, dt);
+    damp(cam, 'cy', 'pvy', cy, lerp(2, 1, sm), dt);
+    damp(cam, 'z', 'pvz', z2, lerp(1.6, .8, sm), dt);
   }
 
   let crop = { sx: 0, sy: 0, sw: 1, sh: 1 };
@@ -634,6 +712,10 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     const ball = aiBall && now - aiBall.t < SP().ballMs ? aiBall : colorBall && now - colorBall.t < 400 ? colorBall : null;
     if (ball && set.target === 'ball') {
       ovx.strokeStyle = '#fff'; ovx.lineWidth = 2; ovx.beginPath(); ovx.arc(ball.x * W, ball.y * H, 6, 0, 7); ovx.stroke();
+    }
+    if (set.court) {
+      ovx.strokeStyle = 'rgba(255,255,255,.55)'; ovx.lineWidth = 1; ovx.beginPath();
+      courtQuad().forEach((p, i) => i ? ovx.lineTo(p[0] * W, p[1] * H) : ovx.moveTo(p[0] * W, p[1] * H)); ovx.closePath(); ovx.stroke();
     }
     const o = cropOf(other);
     ovx.strokeStyle = 'rgba(120,200,255,.9)'; ovx.lineWidth = 1;
@@ -741,7 +823,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   function drawSBSelect() {
     const W = zc.width, H = zc.height;
     zctx.drawImage(v, 0, 0, srcW, srcH, 0, 0, W, H);
-    const old = sbSel.what === 'court' ? set.court : set.sb;
+    if (sbSel.what === 'court') { drawQuadEditor(W, H); return; }
+    const old = set.sb;
     if (old && !sbSel.a) { zctx.setLineDash([12, 8]); zctx.strokeStyle = 'rgba(255,255,255,.8)'; zctx.lineWidth = 3; zctx.strokeRect(old.x * W, old.y * H, old.w * W, old.h * H); zctx.setLineDash([]); }
     if (!sbSel.a || !sbSel.b) return;
     const x = Math.min(sbSel.a.x, sbSel.b.x) * W, y = Math.min(sbSel.a.y, sbSel.b.y) * H;
@@ -750,6 +833,27 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     zctx.fillRect(0, 0, W, y); zctx.fillRect(0, y + h, W, H - y - h); zctx.fillRect(0, y, x, h); zctx.fillRect(x + w, y, W - x - w, h);
     zctx.strokeStyle = '#ff7a1a'; zctx.lineWidth = 4; zctx.strokeRect(x, y, w, h);
   }
+  function drawQuadEditor(W, H) {
+    const P = sbSel.pts.map(p => [p[0] * W, p[1] * H]), r = handleR();
+    zctx.fillStyle = 'rgba(255,122,26,.16)'; zctx.strokeStyle = '#ff7a1a'; zctx.lineWidth = Math.max(3, W / 400);
+    zctx.beginPath(); P.forEach((p, i) => i ? zctx.lineTo(p[0], p[1]) : zctx.moveTo(p[0], p[1])); zctx.closePath(); zctx.fill(); zctx.stroke();
+    // centre line and the two goals, so the user can see how the halves will be split
+    const tm = mixp(P[0], P[1], .5), bm = mixp(P[3], P[2], .5);
+    zctx.setLineDash([14, 10]); zctx.strokeStyle = 'rgba(255,255,255,.85)'; zctx.lineWidth = 2;
+    zctx.beginPath(); zctx.moveTo(tm[0], tm[1]); zctx.lineTo(bm[0], bm[1]); zctx.stroke(); zctx.setLineDash([]);
+    zctx.font = `bold ${Math.round(r * .9)}px -apple-system, sans-serif`; zctx.textAlign = 'center'; zctx.textBaseline = 'middle';
+    for (const [a, b] of [[P[0], P[3]], [P[1], P[2]]]) {
+      const gm = mixp(a, b, .5); zctx.fillStyle = 'rgba(255,255,255,.9)'; zctx.fillRect(gm[0] - r * .25, gm[1] - r * .9, r * .5, r * 1.8);
+    }
+    zctx.fillStyle = 'rgba(255,255,255,.9)'; zctx.fillText('中央線', (tm[0] + bm[0]) / 2, (tm[1] + bm[1]) / 2);
+    P.forEach((p, i) => {
+      zctx.beginPath(); zctx.arc(p[0], p[1], r, 0, 7);
+      zctx.fillStyle = i === sbSel.drag ? '#ff7a1a' : 'rgba(255,122,26,.55)'; zctx.fill();
+      zctx.strokeStyle = '#fff'; zctx.lineWidth = 3; zctx.stroke();
+    });
+  }
+  const canvasScale = () => { const rc = zc.getBoundingClientRect(); return Math.min(rc.width / zc.width, rc.height / zc.height) || 1; };
+  const handleR = () => 18 / canvasScale();       // about 18 px on screen
   function canvasPoint(e) {
     const rc = zc.getBoundingClientRect();
     const scale = Math.min(rc.width / zc.width, rc.height / zc.height);
@@ -757,9 +861,24 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     return { x: clamp((e.clientX - rc.left - (rc.width - dw) / 2) / dw, 0, 1), y: clamp((e.clientY - rc.top - (rc.height - dh) / 2) / dh, 0, 1),
       inside: e.clientX - rc.left >= (rc.width - dw) / 2 && e.clientX - rc.left <= (rc.width + dw) / 2 && e.clientY - rc.top >= (rc.height - dh) / 2 && e.clientY - rc.top <= (rc.height + dh) / 2 };
   }
-  onBoth('pointerdown', e => { if (!sbSel) return; e.preventDefault(); zc.setPointerCapture(e.pointerId); sbSel.a = sbSel.b = canvasPoint(e); });
-  onBoth('pointermove', e => { if (!sbSel || !sbSel.a) return; e.preventDefault(); sbSel.b = canvasPoint(e); });
+  onBoth('pointerdown', e => {
+    if (!sbSel) return; e.preventDefault(); zc.setPointerCapture(e.pointerId);
+    const p = canvasPoint(e);
+    if (sbSel.what === 'court') {
+      // grab the nearest corner within a finger's reach (about 50 px)
+      const sc = canvasScale(); let best = -1, bd = 50;
+      sbSel.pts.forEach((q, i) => { const d = Math.hypot((q[0] - p.x) * zc.width * sc, (q[1] - p.y) * zc.height * sc); if (d < bd) { bd = d; best = i; } });
+      sbSel.drag = best; return;
+    }
+    sbSel.a = sbSel.b = p;
+  });
+  onBoth('pointermove', e => {
+    if (!sbSel) return;
+    if (sbSel.what === 'court') { if (sbSel.drag >= 0) { e.preventDefault(); const p = canvasPoint(e); sbSel.pts[sbSel.drag] = [p.x, p.y]; } return; }
+    if (!sbSel.a) return; e.preventDefault(); sbSel.b = canvasPoint(e);
+  });
   onBoth('pointerup', e => {
+    if (sbSel && sbSel.what === 'court') { sbSel.drag = -1; return; }
     if (!sbSel || !sbSel.a) return;
     sbSel.b = canvasPoint(e);
     const x = Math.min(sbSel.a.x, sbSel.b.x), y = Math.min(sbSel.a.y, sbSel.b.y), w = Math.abs(sbSel.a.x - sbSel.b.x), h = Math.abs(sbSel.a.y - sbSel.b.y);
@@ -771,7 +890,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     saveSet(); endSBSelect(); applyUI();
     toast(isCourt ? 'コートの範囲を登録しました。左右のハーフにゴールまで入ります。' : 'スコアボードを登録しました。右下に表示されます。');
   });
-  function endSBSelect() { sbSel = null; document.body.classList.remove('selecting'); $('rec').disabled = !stream; $('ov').hidden = !set.showOv; paintSB(); }
+  function endSBSelect() { sbSel = null; $('quadBar').hidden = true; document.body.classList.remove('selecting'); $('rec').disabled = !stream; $('ov').hidden = !set.showOv; paintSB(); }
   function paintSB() { $('sbTag').hidden = !set.sb; }
   $('pickSB').addEventListener('click', () => {
     if (!stream) return;
@@ -781,11 +900,22 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   });
   $('pickCourt').addEventListener('click', () => {
     if (!stream) return;
-    show('settings', false); sbSel = { a: null, b: null, what: 'court' };
-    document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true;
-    toast('全体の映像を表示しています。両方のゴールが入るように、コートの外側の線を指で囲んでください。', 8000);
+    const start = set.court ? courtQuad().map(p => [...p]) : [[.1, .38], [.9, .38], [.97, .92], [.03, .92]];
+    show('settings', false); sbSel = { what: 'court', pts: start, drag: -1 };
+    document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true; $('quadBar').hidden = false;
   });
-  $('clearCourt').addEventListener('click', () => { set.court = null; camHalf.fhx = null; saveSet(); applyUI(); toast('コートの範囲を解除しました。'); });
+  $('quadCancel').addEventListener('click', () => endSBSelect());
+  $('quadOk').addEventListener('click', () => {
+    const q = sbSel.pts, [TL, TR, BR, BL] = q;
+    // corners must be roughly in place: top ones above bottom ones, left ones left of right ones
+    if (!(TL[0] < TR[0] && BL[0] < BR[0] && TL[1] < BL[1] && TR[1] < BR[1]) || Math.max(TR[0] - TL[0], BR[0] - BL[0]) < .25) {
+      toast('丸の位置が入れ替わっているようです。左上・右上・右下・左下の順に、コートの四隅へ合わせてください。', 5000); return;
+    }
+    set.court = { pts: q.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]) }; camHalf.fhx = null; camHalf.fez = null;
+    saveSet(); endSBSelect(); applyUI();
+    toast('コートの範囲を登録しました。左右のハーフにゴールまで入ります。');
+  });
+  $('clearCourt').addEventListener('click', () => { set.court = null; camHalf.fhx = null; camHalf.fez = null; saveSet(); applyUI(); toast('コートの範囲を解除しました。'); });
   $('clearSB').addEventListener('click', () => { set.sb = null; saveSet(); paintSB(); toast('スコアボードの小窓を消しました。'); });
 
   // ---------- ball color registration ----------
@@ -978,6 +1108,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     paint();
   }
   slider('maxZoom', 'maxZoom', 'mzOut', x => '×' + x.toFixed(1));
+  slider('upAmt', 'up', 'upOut', x => x <= 1.01 ? 'なし' : '最大×' + x.toFixed(2));
   slider('smooth', 'smooth', 'smOut', x => x < .3 ? 'きびきび' : x > .75 ? 'ゆったり' : 'ふつう');
   slider('sens', 'sens', 'seOut', x => String(x));
   slider('top', 'top', 'tpOut', x => x + '%');
@@ -1012,7 +1143,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       await startCamera();
       show('start', false); $('rec').disabled = false; keepAwake();
       if (set.target === 'ball') loadAI(); else $('trackTxt').textContent = '追跡中';
-      if (!set.court) setTimeout(() => toast('はじめに設定の「コートを囲む」でコートの範囲を登録すると、ゴールまでしっかり映ります。', 7000), 2500);
+      if (!set.court) setTimeout(() => toast('はじめに設定の「コートを囲む」で、4つの丸をコートの四隅に合わせると、ゴールまでしっかり映ります。', 7000), 2500);
       if (Math.max(srcW, srcH) < 1920) toast(`カメラの解像度が${srcW}×${srcH}です。アップにすると粗く見えるかもしれません。`, 5000);
     } catch (e) {
       $('startBtn').textContent = 'もう一度試す';
