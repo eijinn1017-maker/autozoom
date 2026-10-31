@@ -193,9 +193,9 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       <small id="frameNote"></small>
     </div>
     <div class="row" data-for="half">
-      <label for="halfZoom">ハーフの大きさ<output id="hzOut"></output></label>
-      <input type="range" id="halfZoom" min="1.3" max="2.6" step="0.05">
-      <small>コートの半分がちょうど収まるように合わせてください。</small>
+      <label>コートの範囲<span class="tag" id="courtTag" hidden>登録済み</span></label>
+      <div class="seg"><button id="pickCourt">コートを囲む</button><button id="clearCourt">解除</button></div>
+      <small>コートの外側の線（両方のゴールを含む）を指で囲んでください。左右のハーフは、ゴールと中央線が必ず入るように自動で決まります。</small>
     </div>
     <div class="row" data-for="free">
       <label>ズームの決め方</label>
@@ -248,11 +248,13 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let zc = zF, zctx = ctxF;   // the canvas currently shown on screen
 
   // ---------- settings ----------
-  const DEF = { frame: 'free', rec: { free: true, half: true, full: false }, halfZoom: 1.8, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 2, quality: 'std', sens: 50, top: 20, showOv: true, camId: '' };
+  const DEF = { frame: 'half', rec: { free: false, half: true, full: false }, court: null, sport: 'handball', target: 'ball', ballColor: null, sb: null, auto: true, maxZoom: 2.2, smooth: .65, ver: 3, quality: 'std', sens: 50, top: 20, showOv: true, camId: '' };
   let set = { ...DEF };
   try {
     const saved = JSON.parse(localStorage.getItem('az-set') || '{}');
-    if (saved.ver !== 2) { delete saved.smooth; saved.ver = 2; }   // calmer default after update
+    if ((saved.ver || 0) < 2) delete saved.smooth;                       // calmer default
+    if ((saved.ver || 0) < 3) { delete saved.frame; delete saved.rec; }  // half court only by default
+    saved.ver = 3;
     Object.assign(set, saved);
   } catch (e) {}
   const saveSet = () => { try { localStorage.setItem('az-set', JSON.stringify(set)); } catch (e) {} };
@@ -357,13 +359,16 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     actx.drawImage(v, 0, 0, AW, AH);
     const d = actx.getImageData(0, 0, AW, AH).data;
     colH.fill(0); rowH.fill(0); grid.fill(0);
-    const thr = 62 - set.sens * .45, y0 = Math.floor(AH * set.top / 100);
+    const thr = 62 - set.sens * .45, cr = set.court;
+    const y0 = cr ? Math.max(0, Math.floor(AH * (cr.y - cr.h * .08))) : Math.floor(AH * set.top / 100);
+    const y1 = cr ? Math.min(AH, Math.ceil(AH * (cr.y + cr.h * 1.05))) : AH;
+    const x0 = cr ? Math.max(0, Math.floor(AW * (cr.x - cr.w * .03))) : 0, x1 = cr ? Math.min(AW, Math.ceil(AW * (cr.x + cr.w * 1.03))) : AW;
     let n = 0;
     const L = layImg.data;
     for (let y = 0, i = 0; y < AH; y++) for (let x = 0; x < AW; x++, i++) {
       const p = i * 4, r = d[p], g = d[p + 1], b = d[p + 2];
       const lum = (r * 77 + g * 150 + b * 29) >> 8;
-      const mv = hasPrev && y >= y0 && Math.abs(lum - prev[i]) > thr;
+      const mv = hasPrev && y >= y0 && y < y1 && x >= x0 && x < x1 && Math.abs(lum - prev[i]) > thr;
       prev[i] = lum; mark[i] = mv ? 1 : 0; L[p + 3] = mv ? 220 : 0;
       if (!mv) continue;
       n++; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)]++;
@@ -554,24 +559,36 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   // Half-court framing: sits on the left or right half like a TV broadcast and pans across
   // only when play has clearly moved to the other side for a while (or a fast break starts).
+  // The court as registered by the user, or (until then) everything below the ignored top band.
+  const courtRect = () => set.court || { x: 0, y: set.top / 100, w: 1, h: 1 - set.top / 100 };
+  // One half: from just behind the goal to a little past the centre line, full court height,
+  // in the camera's own shape (so nothing is ever cut off: if needed it simply zooms in less).
+  function halfFrame(side) {
+    const c = courtRect();
+    const cw = c.w * .5 + c.w * .1 + c.w * .04, ch = c.h * 1.12;
+    const z = clamp(1 / Math.max(cw, ch), 1, 4), w = 1 / z;
+    const cx = side ? c.x + c.w * 1.04 - w / 2 : c.x - c.w * .04 + w / 2;
+    return { cx, cy: c.y + c.h / 2, z };
+  }
   function halfCourt(ax, fast, dt, now) {
-    const z = set.halfZoom, w = 1 / z, sm = set.smooth;
-    const sideX = s => s ? 1 - w / 2 : w / 2;
+    const sm = set.smooth, c = courtRect(), mid = c.x + c.w / 2;
     if (ax !== null) {
-      if (cam.fhx === null) { cam.fhx = ax; cam.side = ax > .5 ? 1 : 0; cam.cx = sideX(cam.side); cam.z = z; cam.sideAt = now; }
+      if (cam.fhx === null) { cam.fhx = ax; cam.side = ax > mid ? 1 : 0; Object.assign(cam, halfFrame(cam.side)); cam.sideAt = now; }
       cam.fhx += (ax - cam.fhx) * (1 - Math.exp(-dt / lerp(.4, 1, sm)));
-      const want = cam.fhx > .5 ? 1 : 0;
+      const want = cam.fhx > mid ? 1 : 0;
       const towardFast = fast && Math.sign(mv.vx) === (want ? 1 : -1);
-      if (want !== cam.side && (towardFast || (Math.abs(cam.fhx - .5) > .08 && now - cam.sideAt > 2500))) {
+      // stay on a side at least 3 s (a shot and the goal it ends in happen on one side)
+      if (want !== cam.side && (towardFast || (Math.abs(cam.fhx - mid) > c.w * .08 && now - cam.sideAt > 3000))) {
         cam.sideT += dt;
         if (cam.sideT > (towardFast ? .15 : lerp(.8, 1.6, sm))) { cam.side = want; cam.sideT = 0; cam.sideAt = now; }
       } else cam.sideT = Math.max(0, cam.sideT - dt);
     }
     showLabel((cam.side ? '右ハーフ' : '左ハーフ') + (fast ? '・速攻' : ''), fast);
     const wp = lerp(2.4, 1.2, sm) * (fast ? 1.6 : 1);
-    damp(cam, 'cx', 'pvx', sideX(cam.side), wp, dt);
-    damp(cam, 'cy', 'pvy', (set.top / 100 + 1) / 2, 2, dt);
-    damp(cam, 'z', 'pvz', z, 2, dt);
+    const hf = halfFrame(cam.side);
+    damp(cam, 'cx', 'pvx', hf.cx, wp, dt);
+    damp(cam, 'cy', 'pvy', hf.cy, 2, dt);
+    damp(cam, 'z', 'pvz', hf.z, 2, dt);
   }
 
   let crop = { sx: 0, sy: 0, sw: 1, sh: 1 };
@@ -724,6 +741,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   function drawSBSelect() {
     const W = zc.width, H = zc.height;
     zctx.drawImage(v, 0, 0, srcW, srcH, 0, 0, W, H);
+    const old = sbSel.what === 'court' ? set.court : set.sb;
+    if (old && !sbSel.a) { zctx.setLineDash([12, 8]); zctx.strokeStyle = 'rgba(255,255,255,.8)'; zctx.lineWidth = 3; zctx.strokeRect(old.x * W, old.y * H, old.w * W, old.h * H); zctx.setLineDash([]); }
     if (!sbSel.a || !sbSel.b) return;
     const x = Math.min(sbSel.a.x, sbSel.b.x) * W, y = Math.min(sbSel.a.y, sbSel.b.y) * H;
     const w = Math.abs(sbSel.a.x - sbSel.b.x) * W, h = Math.abs(sbSel.a.y - sbSel.b.y) * H;
@@ -744,18 +763,29 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (!sbSel || !sbSel.a) return;
     sbSel.b = canvasPoint(e);
     const x = Math.min(sbSel.a.x, sbSel.b.x), y = Math.min(sbSel.a.y, sbSel.b.y), w = Math.abs(sbSel.a.x - sbSel.b.x), h = Math.abs(sbSel.a.y - sbSel.b.y);
-    if (w < .02 || h < .015) { sbSel.a = sbSel.b = null; toast('指でスコアボードを囲むようになぞってください。'); return; }
-    set.sb = { x, y, w, h }; saveSet(); endSBSelect();
-    toast('スコアボードを登録しました。右下に表示されます。');
+    const isCourt = sbSel.what === 'court';
+    if (isCourt ? (w < .3 || h < .1) : (w < .02 || h < .015)) {
+      sbSel.a = sbSel.b = null; toast(isCourt ? 'コートの外側の線ぜんぶを、指で大きく囲んでください。' : '指でスコアボードを囲むようになぞってください。'); return;
+    }
+    if (isCourt) { set.court = { x, y, w, h }; camHalf.fhx = null; } else set.sb = { x, y, w, h };
+    saveSet(); endSBSelect(); applyUI();
+    toast(isCourt ? 'コートの範囲を登録しました。左右のハーフにゴールまで入ります。' : 'スコアボードを登録しました。右下に表示されます。');
   });
   function endSBSelect() { sbSel = null; document.body.classList.remove('selecting'); $('rec').disabled = !stream; $('ov').hidden = !set.showOv; paintSB(); }
   function paintSB() { $('sbTag').hidden = !set.sb; }
   $('pickSB').addEventListener('click', () => {
     if (!stream) return;
-    show('settings', false); sbSel = { a: null, b: null };
+    show('settings', false); sbSel = { a: null, b: null, what: 'sb' };
     document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true;
     toast('全体の映像を表示しています。スコアボードを指で囲むようになぞってください。', 7000);
   });
+  $('pickCourt').addEventListener('click', () => {
+    if (!stream) return;
+    show('settings', false); sbSel = { a: null, b: null, what: 'court' };
+    document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true;
+    toast('全体の映像を表示しています。両方のゴールが入るように、コートの外側の線を指で囲んでください。', 8000);
+  });
+  $('clearCourt').addEventListener('click', () => { set.court = null; camHalf.fhx = null; saveSet(); applyUI(); toast('コートの範囲を解除しました。'); });
   $('clearSB').addEventListener('click', () => { set.sb = null; saveSet(); paintSB(); toast('スコアボードの小窓を消しました。'); });
 
   // ---------- ball color registration ----------
@@ -935,7 +965,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       const b = e.target.closest('button'); if (!b) return;
       const next = { ...set.rec, [b.dataset.v]: !set.rec[b.dataset.v] };
       if (!next.free && !next.half && !next.full) { toast('少なくとも1つは選んでください。'); return; }
-      set.rec = next; saveSet(); paint();
+      set.rec = next; saveSet(); paint(); applyUI();
     });
     paint();
   })();
@@ -948,7 +978,6 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     paint();
   }
   slider('maxZoom', 'maxZoom', 'mzOut', x => '×' + x.toFixed(1));
-  slider('halfZoom', 'halfZoom', 'hzOut', x => '×' + x.toFixed(2));
   slider('smooth', 'smooth', 'smOut', x => x < .3 ? 'きびきび' : x > .75 ? 'ゆったり' : 'ふつう');
   slider('sens', 'sens', 'seOut', x => String(x));
   slider('top', 'top', 'tpOut', x => x + '%');
@@ -961,6 +990,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     zc = set.frame === 'half' ? zH : zF; zctx = zc === zF ? ctxF : ctxH;
     zF.classList.toggle('offview', zc !== zF); zH.classList.toggle('offview', zc !== zH);
     $('viewBtn').textContent = set.frame === 'half' ? 'ハーフ' : '自由'; trackMode = '';
+    $('viewBtn').hidden = !set.rec.free; if (!set.rec.free && set.frame !== 'half') { set.frame = 'half'; return applyUI(); }
+    $('courtTag').hidden = !set.court;
     $('frameNote').textContent = set.frame === 'half'
       ? 'いまはハーフコートを表示中です。録画する映像は下の「録画する映像」で別に選べます。'
       : 'いまは自由ズームを表示中です。録画する映像は下の「録画する映像」で別に選べます。'; $('sportNote').textContent = SPORT_NOTE[set.sport] || ''; if (set.target === 'ball' && stream) loadAI(); $('ov').hidden = !set.showOv; $('mzLabel').textContent = set.auto ? '最大ズーム' : 'ズーム倍率'; }
@@ -981,6 +1012,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       await startCamera();
       show('start', false); $('rec').disabled = false; keepAwake();
       if (set.target === 'ball') loadAI(); else $('trackTxt').textContent = '追跡中';
+      if (!set.court) setTimeout(() => toast('はじめに設定の「コートを囲む」でコートの範囲を登録すると、ゴールまでしっかり映ります。', 7000), 2500);
       if (Math.max(srcW, srcH) < 1920) toast(`カメラの解像度が${srcW}×${srcH}です。アップにすると粗く見えるかもしれません。`, 5000);
     } catch (e) {
       $('startBtn').textContent = 'もう一度試す';
