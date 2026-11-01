@@ -47,14 +47,14 @@ button{font:inherit;color:inherit;cursor:pointer}
 body.picking canvas{cursor:crosshair}
 body.selecting canvas{touch-action:none;cursor:crosshair}
 body.selecting #rail,body.selecting #hud{display:none}
-body.selecting #toast{top:calc(var(--st) + 12px);bottom:auto}
-#quadBar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--sb) + 14px);background:rgba(10,14,11,.88);border:1px solid var(--line);
-  border-radius:12px;padding:8px 10px 8px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 24px);font-size:13px}
-#quadBar div{display:flex;gap:8px}
-@media (orientation:landscape){
-  #quadBar{left:auto;bottom:auto;right:calc(var(--sr) + 10px);top:50%;transform:translateY(-50%);flex-direction:column;width:118px;padding:10px;text-align:center}
-  #quadBar div{flex-direction:column;width:100%}
-}
+/* small bar at the top centre (court corners are never there); it hops to the bottom if a corner comes near */
+#quadBar{position:fixed;left:50%;transform:translateX(-50%);top:calc(var(--st) + 8px);background:rgba(10,14,11,.85);border:1px solid var(--line);
+  border-radius:999px;padding:5px 5px 5px 14px;display:flex;align-items:center;gap:10px;font-size:13px;white-space:nowrap}
+#quadBar.low{top:auto;bottom:calc(var(--sb) + 8px)}
+#quadBar div{display:flex;gap:6px}
+#quadBar .btn{border-radius:999px;padding:6px 12px}
+body.selecting #toast{bottom:calc(var(--sb) + 60px);top:auto}
+#toast{pointer-events:none}   /* messages never block a finger */
 .tag{font-size:12px;background:var(--pitch);color:#fff;border-radius:5px;padding:1px 7px;margin-left:8px;font-weight:700}
 
 /* control rail: right side in landscape, bottom in portrait */
@@ -253,8 +253,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 </div>
 
 <div id="quadBar" hidden>
-  <span>丸を動かしてコートの四隅に合わせてください</span>
-  <div><button class="btn small" id="quadCancel">キャンセル</button><button class="btn small primary" id="quadOk">決定</button></div>
+  <span>丸を四隅へ</span>
+  <div><button class="btn small" id="quadCancel">やめる</button><button class="btn small primary" id="quadOk">決定</button></div>
 </div>
 <div id="toast" hidden role="status"></div>
 
@@ -846,11 +846,24 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       const gm = mixp(a, b, .5); zctx.fillStyle = 'rgba(255,255,255,.9)'; zctx.fillRect(gm[0] - r * .25, gm[1] - r * .9, r * .5, r * 1.8);
     }
     zctx.fillStyle = 'rgba(255,255,255,.9)'; zctx.fillText('中央線', (tm[0] + bm[0]) / 2, (tm[1] + bm[1]) / 2);
+    keepBarClear();
     P.forEach((p, i) => {
       zctx.beginPath(); zctx.arc(p[0], p[1], r, 0, 7);
       zctx.fillStyle = i === sbSel.drag ? '#ff7a1a' : 'rgba(255,122,26,.55)'; zctx.fill();
       zctx.strokeStyle = '#fff'; zctx.lineWidth = 3; zctx.stroke();
     });
+  }
+  // If a corner sits under the bar, move the bar to the other edge of the screen.
+  function keepBarClear() {
+    if (sbSel.drag >= 0) return;   // never move it under a moving finger
+    const bar = $('quadBar'), b = bar.getBoundingClientRect(), rc = zc.getBoundingClientRect(), sc = canvasScale();
+    const ox = rc.left + (rc.width - zc.width * sc) / 2, oy = rc.top + (rc.height - zc.height * sc) / 2;
+    const pts = sbSel.pts.map(p => [ox + p[0] * zc.width * sc, oy + p[1] * zc.height * sc]);
+    const hits = (top, bottom) => pts.some(([x, y]) => x > b.left - 40 && x < b.right + 40 && y > top - 40 && y < bottom + 40);
+    const st = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--st')) || 0;
+    const topY = st + 8, lowY = innerHeight - 8 - b.height;
+    const low = hits(topY, topY + b.height) && !hits(lowY, lowY + b.height);
+    bar.classList.toggle('low', low);
   }
   const canvasScale = () => { const rc = zc.getBoundingClientRect(); return Math.min(rc.width / zc.width, rc.height / zc.height) || 1; };
   const handleR = () => 18 / canvasScale();       // about 18 px on screen
@@ -866,15 +879,17 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     const p = canvasPoint(e);
     if (sbSel.what === 'court') {
       // grab the nearest corner within a finger's reach (about 50 px)
-      const sc = canvasScale(); let best = -1, bd = 50;
+      const sc = canvasScale(); let best = -1, bd = 80;
       sbSel.pts.forEach((q, i) => { const d = Math.hypot((q[0] - p.x) * zc.width * sc, (q[1] - p.y) * zc.height * sc); if (d < bd) { bd = d; best = i; } });
-      sbSel.drag = best; return;
+      sbSel.drag = best;
+      if (best >= 0) sbSel.off = [sbSel.pts[best][0] - p.x, sbSel.pts[best][1] - p.y];
+      return;
     }
     sbSel.a = sbSel.b = p;
   });
   onBoth('pointermove', e => {
     if (!sbSel) return;
-    if (sbSel.what === 'court') { if (sbSel.drag >= 0) { e.preventDefault(); const p = canvasPoint(e); sbSel.pts[sbSel.drag] = [p.x, p.y]; } return; }
+    if (sbSel.what === 'court') { if (sbSel.drag >= 0) { e.preventDefault(); const p = canvasPoint(e); sbSel.pts[sbSel.drag] = [clamp(p.x + sbSel.off[0], 0, 1), clamp(p.y + sbSel.off[1], 0, 1)]; } return; }
     if (!sbSel.a) return; e.preventDefault(); sbSel.b = canvasPoint(e);
   });
   onBoth('pointerup', e => {
@@ -902,7 +917,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (!stream) return;
     const start = set.court ? courtQuad().map(p => [...p]) : [[.1, .38], [.9, .38], [.97, .92], [.03, .92]];
     show('settings', false); sbSel = { what: 'court', pts: start, drag: -1 };
-    document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true; $('quadBar').hidden = false;
+    document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true; $('quadBar').hidden = false; $('quadBar').classList.remove('low');
   });
   $('quadCancel').addEventListener('click', () => endSBSelect());
   $('quadOk').addEventListener('click', () => {
