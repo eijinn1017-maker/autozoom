@@ -104,6 +104,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 .seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .seg button{flex:1;border:0;background:transparent;padding:8px 6px;font-size:13px}
 .seg button[aria-pressed=true]{background:var(--pitch);color:#fff;font-weight:700}
+.seg button.go{background:var(--bib);color:#1a0d02;font-weight:700}
 
 .clip{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .clip .t{font-weight:700}
@@ -153,6 +154,22 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     </div>
     <p id="startErr" class="err" hidden></p>
     <button class="btn primary" id="startBtn">カメラを起動</button>
+    <button class="btn" id="fromFileBtn">撮った動画から作る</button>
+  </div>
+</div>
+
+<!-- make a zoomed video from a saved one -->
+<input type="file" id="fileIn" accept="video/*" hidden>
+<div class="sheet" id="fileSheet" hidden>
+  <div class="card">
+    <div class="head"><h2>撮った動画から作る</h2><button class="btn small" id="fileCancel">やめる</button></div>
+    <p id="fileInfo"></p>
+    <ol>
+      <li>必要なら先に<strong>設定</strong>で「コートを囲む」「追いかける対象」などを合わせます。</li>
+      <li><strong>作成開始</strong>を押すと、動画を最初から再生しながらアップの映像を作ります。<strong>動画と同じ長さの時間</strong>がかかります。</li>
+      <li>作っている間は<strong>画面を消さず</strong>、アプリを閉じないでください。途中で止めても、そこまでは保存されます。</li>
+    </ol>
+    <div class="seg"><button id="fileSet">設定</button><button id="fileGo" class="go">作成開始</button></div>
   </div>
 </div>
 
@@ -254,6 +271,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   <div class="card">
     <div class="head"><h2>録画一覧</h2><button class="btn small" id="closeClips">閉じる</button></div>
     <p>「写真に保存」を押すと共有メニューが開くので、「ビデオを保存」を選んでください。保存したらここから削除すると、iPhoneの容量が空きます。</p>
+    <button class="btn" id="fromFileBtn2">撮った動画から作る</button>
     <div id="clipList"></div>
   </div>
 </div>
@@ -317,6 +335,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   // ---------- camera ----------
   let stream = null, srcW = 1920, srcH = 1080;
+  let fileMode = false;                 // the picture comes from a saved video instead of the camera
+  const live = () => !!stream || fileMode;
   async function startCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
     const hq = set.quality === 'high';
@@ -346,17 +366,17 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   // ---------- tracking ----------
   // Motion map at 320px wide. Players: densest cluster of motion. Ball: AI detector, then registered ball color.
-  const AW = 320, CELL = 10; let AH = 180, GW = 32, GH = 18;
+  const AW = 320, CELL = 10; let CELL_CAP = 30; let AH = 180, GW = 32, GH = 18;
   const ana = document.createElement('canvas'); const actx = ana.getContext('2d', { willReadFrequently: true });
   const lay = document.createElement('canvas'); const lctx = lay.getContext('2d');
-  let prev, mark, colH, rowH, grid, integ, layImg, rowW, hasPrev = false;
+  let prev, mark, pw, floorC = null, colH, rowH, grid, integ, layImg, rowW, hasPrev = false;
   // two virtual cameras run side by side on the same analysis: free zoom and half court
   const newCam = () => ({ fsh: .5, cx: .5, cy: .6, z: 1, pvx: 0, pvy: 0, pvz: 0, ax: .5, ay: .6, az: 1, ftx: null, fty: null, fz: 1,
     zT: 0, born: performance.now(), last: 0, side: 0, sideT: 0, sideAt: 0, fhx: null });
   const camFree = newCam(), camHalf = newCam();
   let cam = camFree, frameMode = 'free';
   const viewCam = () => set.frame === 'half' ? camHalf : camFree;
-  const mv = { vx: 0, fastT: 0, fastHold: 0 }; let prevAllX = null;
+  const mv = { vx: 0, fastT: 0, fastHold: 0 }; let prevAllX = null, lastVelRes = null, velDt = 0;
   const dbg = {}; let clusterWin = null;            // {gx, gy} window kept between frames (hysteresis)
   let aiBall = null, colorBall = null, lastCluster = null, trackMode = '';
 
@@ -374,7 +394,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     try { if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') await DeviceMotionEvent.requestPermission(); } catch (e) {}
   }
   function wantRot() {
-    if (!(v.videoHeight > v.videoWidth)) return 0;            // landscape picture: nothing to fix
+    if (fileMode || !(v.videoHeight > v.videoWidth)) return 0;   // landscape picture or a saved video: nothing to fix
     let r = grav < 0 ? 270 : 90;                                // default (no sensor): turn clockwise
     if (set.rotFlip) r = r === 90 ? 270 : 90;
     return r;
@@ -411,7 +431,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     AH = Math.max(40, Math.round(AW * srcH / srcW));
     ana.width = AW; ana.height = AH; lay.width = AW; lay.height = AH;
     GW = Math.ceil(AW / CELL); GH = Math.ceil(AH / CELL);
-    prev = new Uint8Array(AW * AH); mark = new Uint8Array(AW * AH);
+    prev = new Uint8Array(AW * AH); mark = new Uint8Array(AW * AH); pw = new Float32Array(AW * AH); floorC = null;
     colH = new Uint32Array(AW); rowH = new Uint32Array(AH);
     grid = new Float32Array(GW * GH); integ = new Float64Array((GW + 1) * (GH + 1)); rowW = new Float32Array(AH).fill(1); maskKey = '';
     layImg = lctx.createImageData(AW, AH);
@@ -480,15 +500,32 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     const thr = 62 - set.sens * .45, mask = courtMask();
     let n = 0; const share = [0, 0];
     const L = layImg.data;
+    // Colour: players usually wear bibs or kits in vivid colours, while referees, coaches, benches and
+    // spectators tend to wear black, navy, grey or white. Movement in a vivid colour (that is not the floor's
+    // colour) counts fully; grey-ish movement counts about an eighth. When everyone wears grey-ish colours,
+    // they all count the same, as before.
+    const fl = floorC; let fr = 0, fg = 0, fc = 0;
     for (let y = 0, i = 0; y < AH; y++) for (let x = 0; x < AW; x++, i++) {
       const p = i * 4, r = d[p], g = d[p + 1], b = d[p + 2];
       const lum = (r * 77 + g * 150 + b * 29) >> 8;
       const mk = mask[i], mv = hasPrev && mk !== 0 && Math.abs(lum - prev[i]) > thr;
       prev[i] = lum; mark[i] = mv ? 1 : 0; L[p + 3] = mv ? 220 : 0;
-      if (!mv) continue;
-      const w = rowW[y];
+      const s = r + g + b + 1;
+      if (!mv) { pw[i] = 0; if (mk && (i & 7) === 0 && s > 90) { fr += r / s; fg += g / s; fc++; } continue; }
+      let viv = 0;
+      if (s > 75) {
+        const nr = r / s, ng = g / s, vg = Math.hypot(nr - .3333, ng - .3333);
+        viv = Math.min(1, Math.min(vg, fl ? Math.hypot(nr - fl[0], ng - fl[1]) * 1.2 : vg) / .11);
+      }
+      const w = rowW[y] * (.12 + .88 * viv);
+      pw[i] = w;
       n++; share[mk - 1] += w; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)] += w;
     }
+    // the floor's colour: the average of the still parts of the court, updated slowly
+    if (fc > 200) { const a = fl ? .05 : 1, f0 = fl || [0, 0]; floorC = [f0[0] + (fr / fc - f0[0]) * a, f0[1] + (fg / fc - f0[1]) * a]; }
+    // One person close to the camera fills many cells; one cell can only count as much as about one
+    // player on the far side, so a referee walking past the camera no longer outweighs the game.
+    for (let c = 0; c < grid.length; c++) if (grid[c] > CELL_CAP) grid[c] = CELL_CAP;
     const first = !hasPrev; hasPrev = true;
     if (withColor) findColorBall(now);
     dbg.n = n;
@@ -510,7 +547,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       const x0 = Math.max(0, (bx - ww / 2) * CELL) | 0, x1 = Math.min(AW, (bx + ww * 1.5) * CELL) | 0;
       const ya = Math.max(0, (by - wh / 2) * CELL) | 0, yb = Math.min(AH, (by + wh * 1.5) * CELL) | 0;
       let k = 0, c = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
-      for (let y = ya; y < yb; y++) { const w = rowW[y]; for (let x = x0, i = y * AW + x0; x < x1; x++, i++) if (mark[i]) { k++; c += w; sx += x * w; sy += y * w; sxx += x * x * w; syy += y * y * w; } }
+      for (let y = ya; y < yb; y++) for (let x = x0, i = y * AW + x0; x < x1; x++, i++) if (mark[i]) { const w = Math.min(pw[i], CELL_CAP / 8); k++; c += w; sx += x * w; sy += y * w; sxx += x * x * w; syy += y * y * w; }
       if (k > 5) {
         const mx = sx / c, my = sy / c;
         res.cluster = { x: mx / AW, y: my / AH, sx: Math.sqrt(Math.max(0, sxx / c - mx * mx)) / AW, sy: Math.sqrt(Math.max(0, syy / c - my * my)) / AH };
@@ -587,11 +624,17 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   }
 
   // How fast the whole field of motion slides sideways (fast-break detector), shared by both cameras.
+  // Follows the crowd of players, not the middle of all movement: with two groups moving at once (the game
+  // and a team warming up beside the court) the middle of all movement jumps from one group to the other,
+  // which used to look like a fast break. A jump of the crowd itself is a new pick, not running.
   function motionVel(r, dt) {
-    if (r.all) {
-      if (prevAllX !== null && dt > 0) mv.vx += ((r.all.mx - prevAllX) / dt - mv.vx) * .15;
-      prevAllX = r.all.mx;
-    } else mv.vx *= .9;
+    const x = r.cluster ? r.cluster.x : null;
+    if (x !== null && r !== lastVelRes) {
+      lastVelRes = r;
+      if (prevAllX !== null && dt > 0 && Math.abs(x - prevAllX) < .08) mv.vx += ((x - prevAllX) / (velDt + dt) - mv.vx) * .3;
+      else mv.vx *= .5;
+      prevAllX = x; velDt = 0;
+    } else { velDt += dt; if (x === null) mv.vx *= .9; }
     // must persist ~0.4s to count (ignores jitter), then stays on briefly so the view doesn't snap back
     const fb = SP().fastBreak;
     if (fb && Math.abs(mv.vx) > fb) { mv.fastT += dt; if (mv.fastT > .4) mv.fastHold = .8; }
@@ -833,12 +876,14 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   }
   let frameNo = 0;
   function loop(t) {
-    if (stream && v.readyState >= 2) {
+    if (live() && v.readyState >= 2) {
       if (!recording && (frameW() !== srcW || frameH() !== srcH)) setupSize();
       // Do nothing until the camera has a new picture: the screen refreshes faster than the camera,
       // and redrawing the same picture twice only costs time.
       const ft = v.currentTime;
-      if (useRVFC ? newFrame : ft !== lastFT) {
+      const fresh = useRVFC ? newFrame : ft !== lastFT;
+      if (!fresh && (sbSel || (fileMode && v.paused))) { updateRot(); if (frameW() !== srcW || frameH() !== srcH) setupSize(); cam = viewCam(); draw(t, false); }
+      if (fresh) {
         newFrame = false; lastFT = ft; frameNo++;
         updateRot();
         const dt = Math.min(.1, (t - last) / 1000); last = t;
@@ -850,7 +895,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
         cam = viewCam(); draw(t, frameNo % 3 === 0);
       }
     }
-    if (recording) $('recTxt').textContent = fmt((Date.now() - recStart) / 1000);
+    if (recording) $('recTxt').textContent = fileMode ? `作成中 ${Math.min(100, Math.floor(v.currentTime / (v.duration || 1) * 100))}%` : fmt((Date.now() - recStart) / 1000);
     requestAnimationFrame(loop);
   }
 
@@ -875,7 +920,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   async function aiLoop() {
     while (true) {
-      if (set.target === 'ball' && stream && v.readyState >= 2 && !document.hidden) {
+      if (set.target === 'ball' && live() && v.readyState >= 2 && !document.hidden) {
         try { await detectOnce(); } catch (e) {}
       }
       await sleep(recording ? 450 : 250);
@@ -1018,16 +1063,16 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     saveSet(); endSBSelect(); applyUI();
     toast(isCourt ? 'コートの範囲を登録しました。左右のハーフにゴールまで入ります。' : 'スコアボードを登録しました。右下に表示されます。');
   });
-  function endSBSelect() { sbSel = null; $('quadBar').hidden = true; document.body.classList.remove('selecting'); $('rec').disabled = !stream; $('ov').hidden = !set.showOv; paintSB(); }
+  function endSBSelect() { sbSel = null; $('quadBar').hidden = true; document.body.classList.remove('selecting'); $('rec').disabled = !live(); $('ov').hidden = !set.showOv; paintSB(); if (fileMode && !recording) show('fileSheet', true); }
   function paintSB() { $('sbTag').hidden = !set.sb; }
   $('pickSB').addEventListener('click', () => {
-    if (!stream) return;
+    if (!live()) return;
     show('settings', false); sbSel = { a: null, b: null, what: 'sb' };
     document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true;
     toast('全体の映像を表示しています。スコアボードを指で囲むようになぞってください。', 7000);
   });
   $('pickCourt').addEventListener('click', () => {
-    if (!stream) return;
+    if (!live()) return;
     const start = set.court && (set.court.rot || 0) === rot ? courtQuad().map(p => [...p]) : [[.1, .38], [.9, .38], [.97, .92], [.03, .92]];
     show('settings', false); sbSel = { what: 'court', pts: start, drag: -1, axis: courtAxis() };
     $('quadAxis').textContent = sbSel.axis === 'tb' ? 'ゴール：手前と奥' : 'ゴール：左右';
@@ -1061,7 +1106,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let picking = false;
   const samp = document.createElement('canvas'); samp.width = samp.height = 7; const sctx = samp.getContext('2d', { willReadFrequently: true });
   onBoth('click', e => {
-    if (!picking || !stream) return;
+    if (!picking || !live()) return;
     const cp = canvasPoint(e); if (!cp.inside) return;
     const px = cp.x, py = cp.y;
     const sx = crop.sx + px * crop.sw, sy = crop.sy + py * crop.sh, r = Math.max(3, srcW / 400);
@@ -1103,17 +1148,18 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   async function startRec() {
     if (!window.MediaRecorder) { toast('このiPhoneでは録画に対応していません。iOSを最新にしてください。'); return; }
     const group = Date.now();
-    const audio = stream.getAudioTracks();
+    const audio = fileMode ? fileAudio() : stream.getAudioTracks();
     recs = [];
     try {
-      recKinds = ['free', 'half', 'full'].filter(k => set.rec[k]);
+      recKinds = ['free', 'half', 'full'].filter(k => set.rec[k] && !(fileMode && k === 'full'));
+      if (!recKinds.length) recKinds = ['free'];   // a saved video with only "全体" chosen: make the free zoom
       for (const kind of ['free', 'half']) {
-        if (!set.rec[kind]) continue;
+        if (!recKinds.includes(kind)) continue;
         const canvas = kind === 'free' ? zF : zH;
         const s = canvas.captureStream(30); audio.forEach(t => s.addTrack(t.clone()));
         recs.push(makeRec(s, kind, canvas.width >= 1920 ? 8e6 : 5e6, group));
       }
-      if (set.rec.full) {
+      if (recKinds.includes('full')) {
         const vid = rot ? rotC.captureStream(30).getVideoTracks() : stream.getVideoTracks().map(t => t.clone());
         const s = new MediaStream([...vid, ...audio.map(t => t.clone())]);
         recs.push(makeRec(s, 'full', srcW >= 2560 ? 14e6 : 8e6, group));
@@ -1133,21 +1179,24 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     recording = false;
     $('rec').classList.remove('on'); $('rec').setAttribute('aria-label', '録画開始');
     $('recPill').classList.remove('on'); $('recTxt').textContent = '保存中…'; $('openSet').disabled = false;
+    if (fileMode) { v.onended = null; v.pause(); }
     recs.forEach(x => { try { x.r.stop(); } catch (e) {} });
     await Promise.all(recs.map(x => x.r.finish()));
-    recs.forEach(x => x.r.stream.getTracks().forEach(t => { if (!stream.getTracks().includes(t)) t.stop(); }));
+    recs.forEach(x => x.r.stream.getTracks().forEach(t => { if (!stream || !stream.getTracks().includes(t)) t.stop(); }));
     recs = [];
     $('recTxt').textContent = '待機中';
     await refreshCount();
     toast(reason || '録画を保存しました。録画一覧のボタンから写真に保存できます。');
+    if (fileMode) { leaveFile(); renderClips(); show('clips', true); }
   }
-  $('rec').addEventListener('click', () => recording ? stopRec() : startRec());
+  $('rec').addEventListener('click', () => recording ? stopRec() : fileMode ? startFile() : startRec());
 
   let wake = null;
   async function keepAwake() { try { if (!wake && navigator.wakeLock) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => wake = null); } } catch (e) {} }
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && recording) stopRec('アプリが閉じられたため、そこまでの録画を保存しました。');
-    if (!document.hidden && stream) { keepAwake(); v.play().catch(() => {}); }
+    if (document.hidden && fileMode) v.pause();
+    if (document.hidden && recording) stopRec(fileMode ? 'アプリが閉じられたため、そこまでを保存しました。' : 'アプリが閉じられたため、そこまでの録画を保存しました。');
+    if (!document.hidden && stream && !fileMode) { keepAwake(); v.play().catch(() => {}); }
   });
 
   // ---------- clips UI ----------
@@ -1207,7 +1256,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     $('frameSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === set.frame)));
     toast(set.frame === 'half' ? 'ハーフコートを表示しています。' : '自由ズームを表示しています。', 1800); };
   $('openSet').onclick = () => { fillCameras(); show('settings', true); };
-  $('closeSet').onclick = () => show('settings', false);
+  $('closeSet').onclick = () => { show('settings', false); if (fileMode && !recording && !sbSel && !picking) show('fileSheet', true); };
   $('openClips').onclick = () => { renderClips(); show('clips', true); };
   $('closeClips').onclick = () => show('clips', false);
 
@@ -1220,7 +1269,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   seg('frameSeg', 'frame', x => x);
   seg('qualSeg', 'quality', x => x);   // updates the setting first, then the camera restarts below
   $('qualSeg').addEventListener('click', async e => {
-    const b = e.target.closest('button'); if (!b || !stream || recording) return;
+    const b = e.target.closest('button'); if (!b || !stream || recording || fileMode) return;
     try { await startCamera(); toast(set.quality === 'high' ? '高画質に切り替えました。' : 'なめらかに切り替えました。'); } catch (err) { toast('カメラを切り替えられませんでした。'); }
   });
   seg('sportSeg', 'sport', x => x);
@@ -1261,15 +1310,73 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     $('viewBtn').textContent = set.frame === 'half' ? 'ハーフ' : '自由'; trackMode = '';
     $('viewBtn').hidden = !set.rec.free; if (!set.rec.free && set.frame !== 'half') { set.frame = 'half'; return applyUI(); }
     $('courtTag').hidden = !(set.court && (set.court.rot || 0) === rot);
-    $('courtWarn').hidden = !stream || !!(set.court && (set.court.rot || 0) === rot);
+    $('courtWarn').hidden = !live() || !!(set.court && (set.court.rot || 0) === rot);
     $('frameNote').textContent = set.frame === 'half'
       ? 'いまはハーフコートを表示中です。録画する映像は下の「録画する映像」で別に選べます。'
-      : 'いまは自由ズームを表示中です。録画する映像は下の「録画する映像」で別に選べます。'; $('sportNote').textContent = SPORT_NOTE[set.sport] || ''; if (set.target === 'ball' && stream) loadAI(); $('ov').hidden = !set.showOv; $('mzLabel').textContent = set.auto ? '最大ズーム' : 'ズーム倍率'; }
+      : 'いまは自由ズームを表示中です。録画する映像は下の「録画する映像」で別に選べます。'; $('sportNote').textContent = SPORT_NOTE[set.sport] || ''; if (set.target === 'ball' && live()) loadAI(); $('ov').hidden = !set.showOv; $('mzLabel').textContent = set.auto ? '最大ズーム' : 'ズーム倍率'; }
   applyUI();
   $('camSel').addEventListener('change', async e => {
+    if (fileMode) { toast('動画から作っている間はカメラを切り替えられません。'); return; }
     set.camId = e.target.value; saveSet();
     try { await startCamera(); toast('カメラを切り替えました。'); } catch (err) { toast('このカメラは使えませんでした。'); }
   });
+
+  // ---------- make a zoomed video from a saved one ----------
+  // The saved video takes the camera's place: it plays once from the start at normal speed while the
+  // same tracking runs on it, and the zoomed pictures are recorded just like during a match.
+  let fileURL = null, actxA = null, mediaSrc = null, audioDest = null, fileName = '';
+  // The video's sound goes into the recording only (not out of the speaker).
+  function initAudio() {
+    try {
+      if (!actxA) actxA = new (window.AudioContext || window.webkitAudioContext)();
+      if (!mediaSrc) { mediaSrc = actxA.createMediaElementSource(v); audioDest = actxA.createMediaStreamDestination(); mediaSrc.connect(audioDest); }
+      actxA.resume();
+    } catch (e) {}
+  }
+  function fileAudio() { try { initAudio(); return audioDest ? audioDest.stream.getAudioTracks().map(t => t.clone()) : []; } catch (e) { return []; } }
+  const pickFile = () => { if (recording) return; $('fileIn').value = ''; $('fileIn').click(); };
+  $('fromFileBtn').onclick = pickFile; $('fromFileBtn2').onclick = () => { show('clips', false); pickFile(); };
+  $('fileIn').addEventListener('change', async () => {
+    const f = $('fileIn').files[0]; if (!f) return;
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    if (fileURL) URL.revokeObjectURL(fileURL);
+    fileURL = URL.createObjectURL(f); fileName = f.name;
+    fileMode = true; picking = false;
+    v.pause(); v.srcObject = null; v.removeAttribute('autoplay'); v.muted = false; v.loop = false; v.src = fileURL;
+    $('fileInfo').textContent = '動画を読み込んでいます…';
+    show('start', false); show('clips', false); show('fileSheet', true); $('rec').disabled = true;
+    try {
+      await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; v.load(); });
+      v.currentTime = 0; rot = 0; S = v; document.body.dataset.rot = 0; $('flipBtn').hidden = true;
+      setupSize(); applyUI(); $('rec').disabled = false;
+      $('trackTxt').textContent = '動画'; $('recTxt').textContent = '待機中';
+      $('fileInfo').textContent = `${fileName}（${fmt(v.duration)}・${srcW}×${srcH}）`;
+      if (set.target === 'ball') loadAI();
+    } catch (e) {
+      $('fileInfo').textContent = 'この動画は読み込めませんでした。写真アプリで撮ったMP4やMOVの動画を選んでください。';
+      $('rec').disabled = true;
+    }
+  });
+  async function startFile() {
+    if (recording || !fileMode || !(v.readyState >= 2)) return;
+    initAudio();                                // must happen inside the tap
+    show('fileSheet', false);
+    v.currentTime = 0;
+    await new Promise(r => { if (!v.seeking) r(); else v.addEventListener('seeked', r, { once: true }); });
+    setupSize();                                // fresh virtual cameras for a fresh start
+    await startRec(); if (!recording) { show('fileSheet', true); return; }
+    $('recTxt').textContent = '作成中';
+    v.onended = () => stopRec('できあがりました。録画一覧から写真に保存できます。');
+    try { await v.play(); } catch (e) { stopRec('動画を再生できませんでした。'); }
+  }
+  $('fileGo').onclick = startFile;
+  $('fileSet').onclick = () => { show('fileSheet', false); fillCameras(); show('settings', true); };
+  $('fileCancel').onclick = () => leaveFile();
+  function leaveFile() {
+    fileMode = false; v.onended = null; v.pause(); v.removeAttribute('src'); v.load(); v.muted = true; v.setAttribute('autoplay', '');
+    if (fileURL) { URL.revokeObjectURL(fileURL); fileURL = null; }
+    show('fileSheet', false); $('rec').disabled = true; $('startBtn').textContent = 'カメラを起動'; show('start', true); applyUI();
+  }
 
   // ---------- start ----------
   $('startBtn').onclick = async () => {
