@@ -29,6 +29,9 @@ button{font:inherit;color:inherit;cursor:pointer}
 /* camera feed: kept in the DOM (iOS stops decoding hidden videos) but invisible */
 #v{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
 #zoom,#zoomH{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+body[data-rot="90"] #zoom,body[data-rot="90"] #zoomH,body[data-rot="270"] #zoom,body[data-rot="270"] #zoomH{
+  inset:auto;left:50%;top:50%;width:100vh;height:100vw;transform:translate(-50%,-50%) rotate(-90deg)}
+body[data-rot="270"] #zoom,body[data-rot="270"] #zoomH{transform:translate(-50%,-50%) rotate(90deg)}
 .offview{visibility:hidden}
 #viewBtn{font-weight:700}
 
@@ -128,6 +131,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   <button class="round" id="openSet" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   <button id="rec" aria-label="録画開始" disabled><span></span></button>
   <button class="round" id="openClips" aria-label="録画一覧"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg><span class="badge" id="clipCount" hidden>0</span></button>
+  <button class="round" id="flipBtn" hidden aria-label="映像の上下を反転">反転</button>
   <button class="round" id="viewBtn" aria-label="画面に表示する画角を切り替え">自由</button>
 </div>
 
@@ -354,8 +358,54 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   const dbg = {}; let clusterWin = null;            // {gx, gy} window kept between frames (hysteresis)
   let aiBall = null, colorBall = null, lastCluster = null, trackMode = '';
 
+  // ---------- orientation fix ----------
+  // With "portrait orientation lock" on, an iPhone held sideways still delivers an upright (portrait) picture,
+  // so the court arrives turned 90°. The app then turns every camera picture back to landscape itself.
+  // Which way to turn comes from gravity (the phone's motion sensor); "flip" corrects it by hand if needed.
+  const rotC = document.createElement('canvas'), rotX = rotC.getContext('2d');
+  let S = v, rot = 0, grav = 0;   // S: the picture everything else reads from
+  window.addEventListener('devicemotion', e => {
+    const g = e.accelerationIncludingGravity; if (!g || g.x == null) return;
+    if (g.x > 6) grav = 1; else if (g.x < -6) grav = -1;
+  });
+  async function askMotion() {
+    try { if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') await DeviceMotionEvent.requestPermission(); } catch (e) {}
+  }
+  function wantRot() {
+    if (!(v.videoHeight > v.videoWidth)) return 0;            // landscape picture: nothing to fix
+    let r = grav < 0 ? 270 : 90;                                // default (no sensor): turn clockwise
+    if (set.rotFlip) r = r === 90 ? 270 : 90;
+    return r;
+  }
+  function frameW() { return rot ? v.videoHeight : v.videoWidth; }
+  function frameH() { return rot ? v.videoWidth : v.videoHeight; }
+  function updateRot() {
+    const r = wantRot();
+    if (r !== rot && !recording) {
+      const was = rot; rot = r; S = rot ? rotC : v;
+      // turned the other way round (flip): carry the registered court and scoreboard over instead of losing them
+      if (was && rot && was !== rot) {
+        const c = set.court;
+        if (c && c.pts && c.rot === was) { const [TL, TR, BR, BL] = c.pts.map(p => [1 - p[0], 1 - p[1]]); set.court = { pts: [BR, BL, TL, TR], rot }; }
+        const b = set.sb;
+        if (b && b.rot === was) set.sb = { x: 1 - b.x - b.w, y: 1 - b.y - b.h, w: b.w, h: b.h, rot };
+        saveSet(); camHalf.fhx = null;
+      }
+      document.body.dataset.rot = rot;
+      $('flipBtn').hidden = !rot;
+      if (rot && !was) toast('iPhoneが縦向きロックのため、映像の向きをアプリで直しています。上下が逆さまなら「反転」を押してください。', 7000);
+      setupSize();
+    }
+    if (rot) {
+      const w = v.videoHeight, h = v.videoWidth;
+      if (rotC.width !== w || rotC.height !== h) { rotC.width = w; rotC.height = h; }
+      rotX.setTransform(1, 0, 0, 1, 0, 0);
+      if (rot === 90) { rotX.translate(w, 0); rotX.rotate(Math.PI / 2); } else { rotX.translate(0, h); rotX.rotate(-Math.PI / 2); }
+      rotX.drawImage(v, 0, 0);
+    }
+  }
   function setupSize() {
-    srcW = v.videoWidth || 1920; srcH = v.videoHeight || 1080;
+    srcW = frameW() || 1920; srcH = frameH() || 1080;
     AH = Math.max(40, Math.round(AW * srcH / srcW));
     ana.width = AW; ana.height = AH; lay.width = AW; lay.height = AH;
     GW = Math.ceil(AW / CELL); GH = Math.ceil(AH / CELL);
@@ -375,10 +425,10 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   let maskBuf = null, maskKey = '';
   function courtMask() {
-    const key = JSON.stringify([set.court, set.top, AW, AH]);
+    const key = JSON.stringify([set.court, set.top, AW, AH, rot]);
     if (key === maskKey && maskBuf) return maskBuf;
     maskKey = key; maskBuf = new Uint8Array(AW * AH);
-    if (!set.court) { const y0 = Math.floor(AH * set.top / 100); maskBuf.fill(1, y0 * AW); return maskBuf; }
+    if (!set.court || (set.court.rot || 0) !== rot) { const y0 = Math.floor(AH * set.top / 100); maskBuf.fill(1, y0 * AW); return maskBuf; }
     const g = courtGeom(), cx = (g.tm[0] + g.bm[0]) / 2, cy = (g.tm[1] + g.bm[1]) / 2;
     const grow = p => [cx + (p[0] - cx) * 1.06, cy + (p[1] - cy) * 1.06];
     const head = g.depth * .18;
@@ -395,7 +445,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     return maskBuf;
   }
   function analyze(now, withColor) {
-    actx.drawImage(v, 0, 0, AW, AH);
+    actx.drawImage(S, 0, 0, AW, AH);
     const d = actx.getImageData(0, 0, AW, AH).data;
     colH.fill(0); rowH.fill(0); grid.fill(0);
     const thr = 62 - set.sens * .45, mask = courtMask();
@@ -466,7 +516,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     const x0 = clamp(c.x * srcW - rw / 2, 0, srcW - rw), y0 = clamp(c.y * srcH - rh / 2, 0, srcH - rh);
     const CW = 480, CH = Math.round(480 * srcH / srcW), N = CW * CH;
     if (cb.width !== CW || cb.height !== CH || !cbMask) { cb.width = CW; cb.height = CH; cbMask = new Uint8Array(N); cbStack = new Int32Array(N); }
-    cbx.drawImage(v, x0, y0, rw, rh, 0, 0, CW, CH);
+    cbx.drawImage(S, x0, y0, rw, rh, 0, 0, CW, CH);
     const d = cbx.getImageData(0, 0, CW, CH).data;
     const ytop = SP().ballAboveTop ? 0 : Math.max(0, (srcH * set.top / 100 - y0) / rh * CH) * CW;
     let cnt = 0;
@@ -601,6 +651,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   const mixp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
   function courtQuad() {
     const c = set.court;
+    if (c && (c.rot || 0) !== rot) { const t = set.top / 100; return [[0, t], [1, t], [1, 1], [0, 1]]; }   // drawn in the other orientation
     if (c && c.pts) return c.pts;
     if (c && c.w) return [[c.x, c.y], [c.x + c.w, c.y], [c.x + c.w, c.y + c.h], [c.x, c.y + c.h]];   // older rectangle
     const t = set.top / 100; return [[0, t], [1, t], [1, 1], [0, 1]];
@@ -676,7 +727,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   }
   function render(c, canvas, ctx) {
     const k = cropOf(c);
-    ctx.drawImage(v, k.sx, k.sy, k.sw, k.sh, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(S, k.sx, k.sy, k.sw, k.sh, 0, 0, canvas.width, canvas.height);
     drawInset(canvas, ctx);
     return k;
   }
@@ -732,12 +783,13 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   let frameNo = 0;
   function loop(t) {
     if (stream && v.readyState >= 2) {
-      if (!recording && (v.videoWidth !== srcW || v.videoHeight !== srcH)) setupSize();
+      if (!recording && (frameW() !== srcW || frameH() !== srcH)) setupSize();
       // Do nothing until the camera has a new picture: the screen refreshes faster than the camera,
       // and redrawing the same picture twice only costs time.
       const ft = v.currentTime;
       if (useRVFC ? newFrame : ft !== lastFT) {
         newFrame = false; lastFT = ft; frameNo++;
+        updateRot();
         const dt = Math.min(.1, (t - last) / 1000); last = t;
         // motion analysis 15 times a second is plenty; the picture itself stays at full speed
         if (frameNo % 2 === 0) lastRes = analyze(t, frameNo % 6 === 0);
@@ -792,7 +844,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     const h = w * srcH / srcW;
     const x0 = clamp(cx - w / 2, 0, srcW - w), y0 = clamp(cy - h / 2, 0, srcH - h);
     det.width = 320; det.height = Math.round(320 * srcH / srcW);
-    dctx.drawImage(v, x0, y0, w, h, 0, 0, det.width, det.height);
+    dctx.drawImage(S, x0, y0, w, h, 0, 0, det.width, det.height);
     const preds = await model.detect(det, 20, .2);
     let best = null, bestScore = 0;
     for (const p of preds) {
@@ -811,18 +863,18 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   // ---------- scoreboard inset ----------
   let sbSel = null; // {a:{x,y}, b:{x,y}} while the user is outlining the scoreboard
   function drawInset(canvas, ctx) {
-    const b = set.sb; if (!b) return;
+    const b = set.sb; if (!b || (b.rot || 0) !== rot) return;
     const W = canvas.width, H = canvas.height, zctx = ctx;
     const aspect = (b.w * srcW) / (b.h * srcH);
     let dw = Math.min(W * .3, H * .22 * aspect), dh = dw / aspect;
     const m = Math.round(W * .018), dx = W - dw - m, dy = H - dh - m;
     zctx.fillStyle = 'rgba(0,0,0,.6)'; zctx.fillRect(dx - 3, dy - 3, dw + 6, dh + 6);
-    zctx.drawImage(v, b.x * srcW, b.y * srcH, b.w * srcW, b.h * srcH, dx, dy, dw, dh);
+    zctx.drawImage(S, b.x * srcW, b.y * srcH, b.w * srcW, b.h * srcH, dx, dy, dw, dh);
     zctx.strokeStyle = 'rgba(255,255,255,.85)'; zctx.lineWidth = 2; zctx.strokeRect(dx - 1, dy - 1, dw + 2, dh + 2);
   }
   function drawSBSelect() {
     const W = zc.width, H = zc.height;
-    zctx.drawImage(v, 0, 0, srcW, srcH, 0, 0, W, H);
+    zctx.drawImage(S, 0, 0, srcW, srcH, 0, 0, W, H);
     if (sbSel.what === 'court') { drawQuadEditor(W, H); return; }
     const old = set.sb;
     if (old && !sbSel.a) { zctx.setLineDash([12, 8]); zctx.strokeStyle = 'rgba(255,255,255,.8)'; zctx.lineWidth = 3; zctx.strokeRect(old.x * W, old.y * H, old.w * W, old.h * H); zctx.setLineDash([]); }
@@ -856,23 +908,30 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   // If a corner sits under the bar, move the bar to the other edge of the screen.
   function keepBarClear() {
     if (sbSel.drag >= 0) return;   // never move it under a moving finger
-    const bar = $('quadBar'), b = bar.getBoundingClientRect(), rc = zc.getBoundingClientRect(), sc = canvasScale();
-    const ox = rc.left + (rc.width - zc.width * sc) / 2, oy = rc.top + (rc.height - zc.height * sc) / 2;
-    const pts = sbSel.pts.map(p => [ox + p[0] * zc.width * sc, oy + p[1] * zc.height * sc]);
+    const bar = $('quadBar'), b = bar.getBoundingClientRect();
+    const pts = sbSel.pts.map(p => toScreen(p[0], p[1]));
     const hits = (top, bottom) => pts.some(([x, y]) => x > b.left - 40 && x < b.right + 40 && y > top - 40 && y < bottom + 40);
     const st = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--st')) || 0;
     const topY = st + 8, lowY = innerHeight - 8 - b.height;
     const low = hits(topY, topY + b.height) && !hits(lowY, lowY + b.height);
     bar.classList.toggle('low', low);
   }
-  const canvasScale = () => { const rc = zc.getBoundingClientRect(); return Math.min(rc.width / zc.width, rc.height / zc.height) || 1; };
+  // Where the shown picture sits on screen (it may be turned when the orientation fix is on).
+  function viewGeom() {
+    const ew = zc.offsetWidth || innerWidth, eh = zc.offsetHeight || innerHeight, r = zc.getBoundingClientRect();
+    const sc = Math.min(ew / zc.width, eh / zc.height) || 1, a = (rot === 90 ? -90 : rot === 270 ? 90 : 0) * Math.PI / 180;
+    return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, sc, dw: zc.width * sc, dh: zc.height * sc, cos: Math.cos(a), sin: Math.sin(a) };
+  }
+  function toScreen(nx, ny) {
+    const g = viewGeom(), lx = (nx - .5) * g.dw, ly = (ny - .5) * g.dh;
+    return [g.cx + lx * g.cos - ly * g.sin, g.cy + lx * g.sin + ly * g.cos];
+  }
+  const canvasScale = () => viewGeom().sc;
   const handleR = () => 18 / canvasScale();       // about 18 px on screen
   function canvasPoint(e) {
-    const rc = zc.getBoundingClientRect();
-    const scale = Math.min(rc.width / zc.width, rc.height / zc.height);
-    const dw = zc.width * scale, dh = zc.height * scale;
-    return { x: clamp((e.clientX - rc.left - (rc.width - dw) / 2) / dw, 0, 1), y: clamp((e.clientY - rc.top - (rc.height - dh) / 2) / dh, 0, 1),
-      inside: e.clientX - rc.left >= (rc.width - dw) / 2 && e.clientX - rc.left <= (rc.width + dw) / 2 && e.clientY - rc.top >= (rc.height - dh) / 2 && e.clientY - rc.top <= (rc.height + dh) / 2 };
+    const g = viewGeom(), dx = e.clientX - g.cx, dy = e.clientY - g.cy;
+    const x = (dx * g.cos + dy * g.sin) / g.dw + .5, y = (-dx * g.sin + dy * g.cos) / g.dh + .5;
+    return { x: clamp(x, 0, 1), y: clamp(y, 0, 1), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
   }
   onBoth('pointerdown', e => {
     if (!sbSel) return; e.preventDefault(); zc.setPointerCapture(e.pointerId);
@@ -880,7 +939,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (sbSel.what === 'court') {
       // grab the nearest corner within a finger's reach (about 50 px)
       const sc = canvasScale(); let best = -1, bd = 80;
-      sbSel.pts.forEach((q, i) => { const d = Math.hypot((q[0] - p.x) * zc.width * sc, (q[1] - p.y) * zc.height * sc); if (d < bd) { bd = d; best = i; } });
+      sbSel.pts.forEach((q, i) => { const [qx, qy] = toScreen(q[0], q[1]); const d = Math.hypot(qx - e.clientX, qy - e.clientY); if (d < bd) { bd = d; best = i; } });
       sbSel.drag = best;
       if (best >= 0) sbSel.off = [sbSel.pts[best][0] - p.x, sbSel.pts[best][1] - p.y];
       return;
@@ -901,7 +960,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (isCourt ? (w < .3 || h < .1) : (w < .02 || h < .015)) {
       sbSel.a = sbSel.b = null; toast(isCourt ? 'コートの外側の線ぜんぶを、指で大きく囲んでください。' : '指でスコアボードを囲むようになぞってください。'); return;
     }
-    if (isCourt) { set.court = { x, y, w, h }; camHalf.fhx = null; } else set.sb = { x, y, w, h };
+    if (isCourt) { set.court = { x, y, w, h }; camHalf.fhx = null; } else set.sb = { x, y, w, h, rot };
     saveSet(); endSBSelect(); applyUI();
     toast(isCourt ? 'コートの範囲を登録しました。左右のハーフにゴールまで入ります。' : 'スコアボードを登録しました。右下に表示されます。');
   });
@@ -915,7 +974,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   });
   $('pickCourt').addEventListener('click', () => {
     if (!stream) return;
-    const start = set.court ? courtQuad().map(p => [...p]) : [[.1, .38], [.9, .38], [.97, .92], [.03, .92]];
+    const start = set.court && (set.court.rot || 0) === rot ? courtQuad().map(p => [...p]) : [[.1, .38], [.9, .38], [.97, .92], [.03, .92]];
     show('settings', false); sbSel = { what: 'court', pts: start, drag: -1 };
     document.body.classList.add('selecting'); $('rec').disabled = true; $('ov').hidden = true; $('quadBar').hidden = false; $('quadBar').classList.remove('low');
   });
@@ -926,7 +985,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (!(TL[0] < TR[0] && BL[0] < BR[0] && TL[1] < BL[1] && TR[1] < BR[1]) || Math.max(TR[0] - TL[0], BR[0] - BL[0]) < .25) {
       toast('丸の位置が入れ替わっているようです。左上・右上・右下・左下の順に、コートの四隅へ合わせてください。', 5000); return;
     }
-    set.court = { pts: q.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]) }; camHalf.fhx = null; camHalf.fez = null;
+    set.court = { pts: q.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]), rot }; camHalf.fhx = null; camHalf.fez = null;
     saveSet(); endSBSelect(); applyUI();
     toast('コートの範囲を登録しました。左右のハーフにゴールまで入ります。');
   });
@@ -938,13 +997,10 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   const samp = document.createElement('canvas'); samp.width = samp.height = 7; const sctx = samp.getContext('2d', { willReadFrequently: true });
   onBoth('click', e => {
     if (!picking || !stream) return;
-    const rc = zc.getBoundingClientRect();
-    const scale = Math.min(rc.width / zc.width, rc.height / zc.height);
-    const dw = zc.width * scale, dh = zc.height * scale;
-    const px = (e.clientX - rc.left - (rc.width - dw) / 2) / dw, py = (e.clientY - rc.top - (rc.height - dh) / 2) / dh;
-    if (px < 0 || px > 1 || py < 0 || py > 1) return;
+    const cp = canvasPoint(e); if (!cp.inside) return;
+    const px = cp.x, py = cp.y;
     const sx = crop.sx + px * crop.sw, sy = crop.sy + py * crop.sh, r = Math.max(3, srcW / 400);
-    sctx.drawImage(v, sx - r, sy - r, r * 2, r * 2, 0, 0, 7, 7);
+    sctx.drawImage(S, sx - r, sy - r, r * 2, r * 2, 0, 0, 7, 7);
     const d = sctx.getImageData(2, 2, 3, 3).data; let R = 0, G = 0, B = 0;
     for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; }
     R /= 9; G /= 9; B /= 9; const s = R + G + B + 1;
@@ -993,7 +1049,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
         recs.push(makeRec(s, kind, canvas.width >= 1920 ? 8e6 : 5e6, group));
       }
       if (set.rec.full) {
-        const s = new MediaStream([...stream.getVideoTracks().map(t => t.clone()), ...audio.map(t => t.clone())]);
+        const vid = rot ? rotC.captureStream(30).getVideoTracks() : stream.getVideoTracks().map(t => t.clone());
+        const s = new MediaStream([...vid, ...audio.map(t => t.clone())]);
         recs.push(makeRec(s, 'full', srcW >= 2560 ? 14e6 : 8e6, group));
       }
       for (const x of recs) { await putClip(x.clip); x.r.start(2000); }
@@ -1080,6 +1137,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   // ---------- sheets & settings ----------
   const show = (id, on) => $(id).hidden = !on;
+  $('flipBtn').onclick = () => { if (recording) { toast('録画中は反転できません。録画を止めてから押してください。'); return; } set.rotFlip = !set.rotFlip; saveSet(); camHalf.fhx = null; toast('映像の上下を反転しました。', 1800); };
   $('viewBtn').onclick = () => { set.frame = set.frame === 'half' ? 'free' : 'half'; saveSet(); applyUI();
     $('frameSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === set.frame)));
     toast(set.frame === 'half' ? 'ハーフコートを表示しています。' : '自由ズームを表示しています。', 1800); };
@@ -1137,7 +1195,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     zF.classList.toggle('offview', zc !== zF); zH.classList.toggle('offview', zc !== zH);
     $('viewBtn').textContent = set.frame === 'half' ? 'ハーフ' : '自由'; trackMode = '';
     $('viewBtn').hidden = !set.rec.free; if (!set.rec.free && set.frame !== 'half') { set.frame = 'half'; return applyUI(); }
-    $('courtTag').hidden = !set.court;
+    $('courtTag').hidden = !(set.court && (set.court.rot || 0) === rot);
     $('frameNote').textContent = set.frame === 'half'
       ? 'いまはハーフコートを表示中です。録画する映像は下の「録画する映像」で別に選べます。'
       : 'いまは自由ズームを表示中です。録画する映像は下の「録画する映像」で別に選べます。'; $('sportNote').textContent = SPORT_NOTE[set.sport] || ''; if (set.target === 'ball' && stream) loadAI(); $('ov').hidden = !set.showOv; $('mzLabel').textContent = set.auto ? '最大ズーム' : 'ズーム倍率'; }
@@ -1154,11 +1212,12 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       err.textContent = 'この画面ではカメラが使えません。SafariでこのページのURLを開いてください。'; err.hidden = false; return;
     }
     $('startBtn').textContent = '起動中…';
+    await askMotion();   // lets the app tell which way the phone is turned
     try {
       await startCamera();
       show('start', false); $('rec').disabled = false; keepAwake();
       if (set.target === 'ball') loadAI(); else $('trackTxt').textContent = '追跡中';
-      if (!set.court) setTimeout(() => toast('はじめに設定の「コートを囲む」で、4つの丸をコートの四隅に合わせると、ゴールまでしっかり映ります。', 7000), 2500);
+      setTimeout(() => (set.court && (set.court.rot || 0) === rot) || toast('はじめに設定の「コートを囲む」で、4つの丸をコートの四隅に合わせると、ゴールまでしっかり映ります。', 7000), 2500);
       if (Math.max(srcW, srcH) < 1920) toast(`カメラの解像度が${srcW}×${srcH}です。アップにすると粗く見えるかもしれません。`, 5000);
     } catch (e) {
       $('startBtn').textContent = 'もう一度試す';
