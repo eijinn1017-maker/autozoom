@@ -349,7 +349,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   const AW = 320, CELL = 10; let AH = 180, GW = 32, GH = 18;
   const ana = document.createElement('canvas'); const actx = ana.getContext('2d', { willReadFrequently: true });
   const lay = document.createElement('canvas'); const lctx = lay.getContext('2d');
-  let prev, mark, colH, rowH, grid, integ, layImg, hasPrev = false;
+  let prev, mark, colH, rowH, grid, integ, layImg, rowW, hasPrev = false;
   // two virtual cameras run side by side on the same analysis: free zoom and half court
   const newCam = () => ({ fsh: .5, cx: .5, cy: .6, z: 1, pvx: 0, pvy: 0, pvz: 0, ax: .5, ay: .6, az: 1, ftx: null, fty: null, fz: 1,
     zT: 0, born: performance.now(), last: 0, side: 0, sideT: 0, sideAt: 0, fhx: null });
@@ -413,7 +413,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     GW = Math.ceil(AW / CELL); GH = Math.ceil(AH / CELL);
     prev = new Uint8Array(AW * AH); mark = new Uint8Array(AW * AH);
     colH = new Uint32Array(AW); rowH = new Uint32Array(AH);
-    grid = new Uint32Array(GW * GH); integ = new Uint32Array((GW + 1) * (GH + 1));
+    grid = new Float32Array(GW * GH); integ = new Float64Array((GW + 1) * (GH + 1)); rowW = new Float32Array(AH).fill(1); maskKey = '';
     layImg = lctx.createImageData(AW, AH);
     hasPrev = false; clusterWin = null; prevAllX = null; mv.vx = 0;
     Object.assign(camFree, newCam()); Object.assign(camHalf, newCam());
@@ -425,11 +425,33 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   function pct(h, n, q) { const t = n * q; let c = 0; for (let i = 0; i < h.length; i++) { c += h[i]; if (c >= t) return i + .5; } return h.length - .5; }
   const winSum = (gx, gy, w, h) => { const W1 = GW + 1; return integ[(gy + h) * W1 + gx + w] - integ[gy * W1 + gx + w] - integ[(gy + h) * W1 + gx] + integ[gy * W1 + gx]; };
 
+  // Perspective: a person near the camera covers many more pixels than one on the far side, so a lone
+  // referee or coach close by used to outweigh a whole group of players far away. Each row of the picture
+  // gets a weight so that one person counts about the same wherever they stand.
+  // The size of a person scales with how wide the court looks at that height.
+  function fillRowWeights() {
+    let yt, yb, wt, wb;
+    const c = set.court;
+    if (c && (c.rot || 0) === rot) {
+      const [TL, TR, BR, BL] = courtQuad();
+      yt = (TL[1] + TR[1]) / 2; yb = (BL[1] + BR[1]) / 2; wt = TR[0] - TL[0]; wb = BR[0] - BL[0];
+    } else {
+      // no court registered: assume a typical seat, far side about 60% the size of the near side
+      yt = set.top / 100; yb = 1; wt = .6; wb = 1;
+    }
+    if (!(wt > 0) || !(wb > 0) || !(yb > yt)) { rowW.fill(1); return; }
+    for (let y = 0; y < AH; y++) {
+      const t = clamp(((y + .5) / AH - yt) / (yb - yt), -.25, 1.15);
+      const s = Math.max(wt * .5, wt + (wb - wt) * t);
+      rowW[y] = Math.min(6, (wb / s) ** 2);
+    }
+  }
   let maskBuf = null, maskKey = '';
   function courtMask() {
     const key = JSON.stringify([set.court, set.top, AW, AH, rot, srcW, srcH]);
     if (key === maskKey && maskBuf) return maskBuf;
     maskKey = key; maskBuf = new Uint8Array(AW * AH);
+    fillRowWeights();
     if (!set.court || (set.court.rot || 0) !== rot) {
       const y0 = Math.floor(AH * set.top / 100);
       for (let y = y0; y < AH; y++) for (let x = 0; x < AW; x++) maskBuf[y * AW + x] = x < AW / 2 ? 1 : 2;
@@ -464,7 +486,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       const mk = mask[i], mv = hasPrev && mk !== 0 && Math.abs(lum - prev[i]) > thr;
       prev[i] = lum; mark[i] = mv ? 1 : 0; L[p + 3] = mv ? 220 : 0;
       if (!mv) continue;
-      n++; share[mk - 1]++; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)]++;
+      const w = rowW[y];
+      n++; share[mk - 1] += w; colH[x]++; rowH[y]++; grid[((y / CELL) | 0) * GW + ((x / CELL) | 0)] += w;
     }
     const first = !hasPrev; hasPrev = true;
     if (withColor) findColorBall(now);
@@ -486,9 +509,9 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       // centroid + spread over a window twice as large around it
       const x0 = Math.max(0, (bx - ww / 2) * CELL) | 0, x1 = Math.min(AW, (bx + ww * 1.5) * CELL) | 0;
       const ya = Math.max(0, (by - wh / 2) * CELL) | 0, yb = Math.min(AH, (by + wh * 1.5) * CELL) | 0;
-      let c = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
-      for (let y = ya; y < yb; y++) for (let x = x0, i = y * AW + x0; x < x1; x++, i++) if (mark[i]) { c++; sx += x; sy += y; sxx += x * x; syy += y * y; }
-      if (c > 5) {
+      let k = 0, c = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
+      for (let y = ya; y < yb; y++) { const w = rowW[y]; for (let x = x0, i = y * AW + x0; x < x1; x++, i++) if (mark[i]) { k++; c += w; sx += x * w; sy += y * w; sxx += x * x * w; syy += y * y * w; } }
+      if (k > 5) {
         const mx = sx / c, my = sy / c;
         res.cluster = { x: mx / AW, y: my / AH, sx: Math.sqrt(Math.max(0, sxx / c - mx * mx)) / AW, sy: Math.sqrt(Math.max(0, syy / c - my * my)) / AH };
         lastCluster = res.cluster;
@@ -675,7 +698,13 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     // 0 at goal 0, 1 at goal 1 (along the court's length, as the camera sees it)
     const along = (x, y) => (((x - g0[0]) * ar) * ax[0] + (y - g0[1]) * ax[1]) / al;
     const names = tb ? (g0[1] > g1[1] ? ['手前', '奥'] : ['奥', '手前']) : (g0[0] < g1[0] ? ['左', '右'] : ['右', '左']);
-    return { A, B, C, D, g0, g1, along, names, mid: mixp(g0, g1, .5) };
+    // 0 on the edge A-B, 1 on the edge D-C (with goals left and right: 0 = far sideline, 1 = near sideline)
+    const across = (x, y) => {
+      const t = clamp(along(x, y), 0, 1), p = mixp(A, B, t), q = mixp(D, C, t);
+      const dx = (q[0] - p[0]) * ar, dy = q[1] - p[1], l = dx * dx + dy * dy || 1;
+      return ((x - p[0]) * ar * dx + (y - p[1]) * dy) / l;
+    };
+    return { A, B, C, D, g0, g1, along, across, names, mid: mixp(g0, g1, .5) };
   }
   // One half: from just behind its goal to a little past the centre line, the full width of the court,
   // in the camera's own shape, so the goal is never cut off.
@@ -713,10 +742,13 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
     const hf = halfFrame(cam.side), hw = 1 / hf.z, gx = hf.goal[0], gy = hf.goal[1];
     // Close-up: while the attack is near this goal, zoom in a little but always keep the goal in the picture.
+    // Also when play is on the far side of the court: from a low seat the whole half is mostly empty floor
+    // in front of the camera, so the view rises and closes in on the players (the goal still stays in).
     let ez = 1;
     if (set.up > 1.01 && !fast && cam.fhx !== null && frac) {
       const t = g.along(cam.fhx, cam.fhy), fromGoal = cam.side ? 1 - t : t;
-      if (fromGoal < .38) ez = clamp(hw / Math.max(frac, .18), 1, set.up);
+      const farSide = courtAxis() === 'lr' && g.across(cam.fhx, cam.fhy) < .45;
+      if (fromGoal < .38 || farSide) ez = clamp(hw / Math.max(frac, .18), 1, set.up);
     }
     if (cam.fez == null) { cam.fez = cam.aez = 1; cam.ezT = 0; }
     cam.fez += (ez - cam.fez) * (1 - Math.exp(-dt / 1.2));
@@ -1016,7 +1048,11 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     }
     set.court = { pts: q.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]), rot, axis: sbSel.axis }; camHalf.fhx = null; camHalf.fez = null;
     saveSet(); endSBSelect(); applyUI();
-    toast('コートの範囲を登録しました。左右のハーフにゴールまで入ります。');
+    // far side much smaller than the near side = the phone is low and close: far players look tiny and
+    // people next to the camera get in the way
+    const low = (TR[0] - TL[0]) / Math.max(.01, BR[0] - BL[0]) < .5;
+    toast(low ? 'コートを登録しました。ただ、カメラの位置が低いようです。奥の選手が小さく映り、近くの審判や観客に気を取られやすくなります。できれば2階席など高い場所、センターライン付近に置いてください。'
+              : 'コートの範囲を登録しました。左右のハーフにゴールまで入ります。', low ? 9000 : 3500);
   });
   $('clearCourt').addEventListener('click', () => { set.court = null; camHalf.fhx = null; camHalf.fez = null; saveSet(); applyUI(); toast('コートの範囲を解除しました。'); });
   $('clearSB').addEventListener('click', () => { set.sb = null; saveSet(); paintSB(); toast('スコアボードの小窓を消しました。'); });
