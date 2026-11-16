@@ -153,6 +153,9 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     </div>
     <p id="startErr" class="err" hidden></p>
     <button class="btn primary" id="startBtn">カメラを起動</button>
+    <button class="btn" id="fileBtn" style="margin-top:10px">保存した動画を処理する</button>
+    <input type="file" id="fileIn" accept="video/*" hidden>
+    <p class="fnote" style="font-size:12px;opacity:.75;margin:8px 0 0">撮ってある試合の動画を読み込んで、アップの動画を作ります。処理には動画と同じ時間がかかります。粗くならない範囲までしか寄りません。</p>
   </div>
 </div>
 
@@ -317,6 +320,44 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
 
   // ---------- camera ----------
   let stream = null, srcW = 1920, srcH = 1080;
+  // Picture quality guard: never crop narrower than this many pixels of the original picture,
+  // so a close-up stays at least as sharp as a 720p video (1080p original: up to x1.5, 4K: up to x3).
+  const MIN_CROP = 1280;
+  const qCap = () => Math.max(1, Math.max(srcW, srcH) / MIN_CROP);
+  const zCap = () => Math.min(set.maxZoom, qCap());
+
+  // ---------- saved video ----------
+  // A video already on the phone plays through the same tracking as the camera; the close-up is recorded
+  // while it plays (so it takes as long as the video). Its sound is taken through Web Audio.
+  let fileMode = false, fileURL = null, fileAC = null, fileAudio = null;
+  async function startFile(file) {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    fileMode = true; document.body.classList.add('filemode');
+    v.srcObject = null; v.autoplay = false; v.loop = false;
+    if (fileURL) URL.revokeObjectURL(fileURL);
+    fileURL = URL.createObjectURL(file); v.src = fileURL;
+    await new Promise((res, rej) => { v.addEventListener('loadedmetadata', res, { once: true }); v.addEventListener('error', rej, { once: true }); });
+    try {
+      if (!fileAC) {
+        fileAC = new (window.AudioContext || window.webkitAudioContext)();
+        const src = fileAC.createMediaElementSource(v), dst = fileAC.createMediaStreamDestination();
+        src.connect(dst); fileAudio = dst.stream;      // not connected to the speaker: processing is silent
+      }
+      v.muted = false; stream = fileAudio;
+    } catch (e) { v.muted = true; stream = new MediaStream(); }
+    v.currentTime = Math.min(.5, (v.duration || 1) / 2);
+    await new Promise(r => v.addEventListener('seeked', r, { once: true }));
+    setupSize();
+  }
+  async function playFile() {
+    // play() and resume() are called right away, still inside the tap
+    const ac = fileAC ? fileAC.resume().catch(() => {}) : null;
+    v.currentTime = 0;
+    const p = v.play();
+    hasPrev = false; Object.assign(camFree, newCam()); Object.assign(camHalf, newCam());
+    await p; await ac;
+  }
+  v.addEventListener('ended', () => { if (fileMode && recording) stopRec('処理が終わりました。録画一覧のボタンから写真に保存できます。'); });
   async function startCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
     const hq = set.quality === 'high';
@@ -374,7 +415,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     try { if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') await DeviceMotionEvent.requestPermission(); } catch (e) {}
   }
   function wantRot() {
-    if (!(v.videoHeight > v.videoWidth)) return 0;            // landscape picture: nothing to fix
+    if (fileMode || !(v.videoHeight > v.videoWidth)) return 0; // landscape picture or a saved video: nothing to fix
     let r = grav < 0 ? 270 : 90;                                // default (no sensor): turn clockwise
     if (set.rotFlip) r = r === 90 ? 270 : 90;
     return r;
@@ -642,12 +683,12 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       // 1) calm the raw target: detections wobble frame to frame
       const f = 1 - Math.exp(-dt / (lerp(.25, .9, sm) * (fast ? .5 : 1)));
       cam.ftx += (tx - cam.ftx) * f; cam.fty += (ty - cam.fty) * f;
-      if (set.auto) cam.fz += (clamp(1 / frac, 1, set.maxZoom) - cam.fz) * (1 - Math.exp(-dt / lerp(.8, 2, sm)));
+      if (set.auto) cam.fz += (clamp(1 / frac, 1, zCap()) - cam.fz) * (1 - Math.exp(-dt / lerp(.8, 2, sm)));
     } else if (now - cam.last > 3000) {
       if (set.auto) cam.fz += (1 - cam.fz) * (1 - Math.exp(-dt / 1.5));
       mode = '探索中';
     }
-    if (!set.auto) cam.fz = set.maxZoom;
+    if (!set.auto) cam.fz = zCap();
     // 2) zoom only in noticeable steps, at most every 2 s (and not during the first moments)
     if (!set.auto) cam.az = cam.fz;
     else if (now - cam.born > 1500 && now - cam.zT > 2000 && Math.abs(Math.log(cam.fz / cam.az)) > .15) { cam.az = cam.fz; cam.zT = now; }
@@ -753,7 +794,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     if (cam.fez == null) { cam.fez = cam.aez = 1; cam.ezT = 0; }
     cam.fez += (ez - cam.fez) * (1 - Math.exp(-dt / 1.2));
     if (Math.abs(Math.log(cam.fez / cam.aez)) > .1 && now - cam.ezT > 2000) { cam.aez = cam.fez; cam.ezT = now; }
-    const z2 = hf.z * cam.aez, w2 = 1 / z2;
+    // quality guard: if even the half would be too rough, show a little more than the half instead
+    const z2 = Math.min(hf.z * cam.aez, qCap()), w2 = 1 / z2;
     let cx = hf.cx, cy = hf.cy;
     if (cam.aez >= 1.02) {
       // the crop must hold the goal (with some margin) and stay inside the half
@@ -850,7 +892,8 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
         cam = viewCam(); draw(t, frameNo % 3 === 0);
       }
     }
-    if (recording) $('recTxt').textContent = fmt((Date.now() - recStart) / 1000);
+    if (recording) $('recTxt').textContent = fileMode && v.duration
+      ? `処理中 ${fmt(v.currentTime)} / ${fmt(v.duration)}` : fmt((Date.now() - recStart) / 1000);
     requestAnimationFrame(loop);
   }
 
@@ -1107,13 +1150,15 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     recs = [];
     try {
       recKinds = ['free', 'half', 'full'].filter(k => set.rec[k]);
+      // saved video: the original is already on the phone, so only the close-ups are made
+      if (fileMode) { recKinds = recKinds.filter(k => k !== 'full'); if (!recKinds.length) recKinds = [set.frame === 'half' ? 'half' : 'free']; }
       for (const kind of ['free', 'half']) {
-        if (!set.rec[kind]) continue;
+        if (!recKinds.includes(kind)) continue;
         const canvas = kind === 'free' ? zF : zH;
         const s = canvas.captureStream(30); audio.forEach(t => s.addTrack(t.clone()));
         recs.push(makeRec(s, kind, canvas.width >= 1920 ? 8e6 : 5e6, group));
       }
-      if (set.rec.full) {
+      if (recKinds.includes('full')) {
         const vid = rot ? rotC.captureStream(30).getVideoTracks() : stream.getVideoTracks().map(t => t.clone());
         const s = new MediaStream([...vid, ...audio.map(t => t.clone())]);
         recs.push(makeRec(s, 'full', srcW >= 2560 ? 14e6 : 8e6, group));
@@ -1134,6 +1179,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     $('rec').classList.remove('on'); $('rec').setAttribute('aria-label', '録画開始');
     $('recPill').classList.remove('on'); $('recTxt').textContent = '保存中…'; $('openSet').disabled = false;
     recs.forEach(x => { try { x.r.stop(); } catch (e) {} });
+    if (fileMode) v.pause();
     await Promise.all(recs.map(x => x.r.finish()));
     recs.forEach(x => x.r.stream.getTracks().forEach(t => { if (!stream.getTracks().includes(t)) t.stop(); }));
     recs = [];
@@ -1141,13 +1187,23 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
     await refreshCount();
     toast(reason || '録画を保存しました。録画一覧のボタンから写真に保存できます。');
   }
-  $('rec').addEventListener('click', () => recording ? stopRec() : startRec());
+  $('rec').addEventListener('click', async () => {
+    if (recording) return stopRec(fileMode ? '途中で止めました。そこまでのアップの動画を保存しました。' : undefined);
+    if (fileMode) {
+      // play from the start inside the tap (iPhone allows sound playback only from a tap)
+      try { await playFile(); } catch (e) { toast('動画を再生できませんでした。'); return; }
+      await startRec();
+      if (!recording) v.pause();
+      return;
+    }
+    startRec();
+  });
 
   let wake = null;
   async function keepAwake() { try { if (!wake && navigator.wakeLock) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => wake = null); } } catch (e) {} }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && recording) stopRec('アプリが閉じられたため、そこまでの録画を保存しました。');
-    if (!document.hidden && stream) { keepAwake(); v.play().catch(() => {}); }
+    if (!document.hidden && stream && !fileMode) { keepAwake(); v.play().catch(() => {}); }
   });
 
   // ---------- clips UI ----------
@@ -1220,7 +1276,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
   seg('frameSeg', 'frame', x => x);
   seg('qualSeg', 'quality', x => x);   // updates the setting first, then the camera restarts below
   $('qualSeg').addEventListener('click', async e => {
-    const b = e.target.closest('button'); if (!b || !stream || recording) return;
+    const b = e.target.closest('button'); if (!b || !stream || recording || fileMode) return;
     try { await startCamera(); toast(set.quality === 'high' ? '高画質に切り替えました。' : 'なめらかに切り替えました。'); } catch (err) { toast('カメラを切り替えられませんでした。'); }
   });
   seg('sportSeg', 'sport', x => x);
@@ -1267,7 +1323,7 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
       : 'いまは自由ズームを表示中です。録画する映像は下の「録画する映像」で別に選べます。'; $('sportNote').textContent = SPORT_NOTE[set.sport] || ''; if (set.target === 'ball' && stream) loadAI(); $('ov').hidden = !set.showOv; $('mzLabel').textContent = set.auto ? '最大ズーム' : 'ズーム倍率'; }
   applyUI();
   $('camSel').addEventListener('change', async e => {
-    set.camId = e.target.value; saveSet();
+    set.camId = e.target.value; saveSet(); if (fileMode) return;
     try { await startCamera(); toast('カメラを切り替えました。'); } catch (err) { toast('このカメラは使えませんでした。'); }
   });
 
@@ -1292,6 +1348,25 @@ select{font:inherit;color:var(--ink);background:#222b24;border:1px solid var(--l
         : 'カメラを起動できませんでした。ほかのアプリでカメラを使っていたら閉じてから試してください。';
       err.hidden = false;
     }
+  };
+
+  $('fileBtn').onclick = () => $('fileIn').click();
+  $('fileIn').onchange = async e => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    const err = $('startErr'); err.hidden = true; $('fileBtn').textContent = '読み込み中…';
+    try {
+      await startFile(f);
+      show('start', false); $('rec').disabled = false; applyUI();
+      if (set.target === 'ball') loadAI(); else $('trackTxt').textContent = '待機中';
+      const cap = qCap();
+      toast(cap < 1.2
+        ? `この動画は解像度が${srcW}×${srcH}と低いため、ほとんど寄れません（粗くなるのを防ぐため）。カメラの設定で4Kにして撮ると、大きくアップにできます。`
+        : `動画を読み込みました（${srcW}×${srcH}）。画質を保てる×${cap.toFixed(1)}まで寄ります。必要なら設定でコートを囲んでから、赤いボタンで処理を始めてください。`, 9000);
+    } catch (x) {
+      $('fileBtn').textContent = '保存した動画を処理する';
+      err.textContent = 'この動画は読み込めませんでした。'; err.hidden = false;
+    }
+    e.target.value = '';
   };
 
   // In Safari (not yet added to the home screen), show how to install it.
